@@ -25,10 +25,12 @@ df = pd.read_csv("census/census2022jer.csv", encoding="utf-8-sig")
 df.columns = df.columns.str.lower().str.strip()
 
 TRANSPORT_COL = "emtzaehagaaikarimakomavdpuf"   # main transport mode to work
-AREA_COL      = "tatrovaktvtmegurimpuf"          # statistical area (tat-rova)
+ROVA_COL      = "rovaktvtmegurimpuf"             # neighbourhood (rova)
+AREA_COL      = "tatrovaktvtmegurimpuf"          # sub-neighbourhood (tat-rova)
 WEIGHT_COL    = "mishkalpratpuf"                 # person weight
 
 # All commuters (transport code recorded)
+# The census PUF geographic detail stops at tat-rova level – no STAT_2022 field.
 workers = df[df[TRANSPORT_COL].notna()].copy()
 print(f"  Total commuters: {len(workers):,}")
 
@@ -36,7 +38,10 @@ print(f"  Total commuters: {len(workers):,}")
 print("Loading shapefile …")
 gdf_all = gpd.read_file("statistical_areas_2022/statistical_areas_2022.shp")
 jer = gdf_all[gdf_all["SEMEL_YISH"] == 3000].copy()
-jer_dissolved = jer.dissolve(by="TAT_ROVA", aggfunc="first").reset_index()
+# Dissolve the fine STAT_2022 polygons up to (ROVA, TAT_ROVA) level –
+# the finest geography available in the census PUF.
+jer_dissolved = jer.dissolve(by=["ROVA", "TAT_ROVA"], aggfunc="first").reset_index()
+jer_dissolved["ROVA_key"]     = jer_dissolved["ROVA"].astype(float)
 jer_dissolved["TAT_ROVA_key"] = jer_dissolved["TAT_ROVA"].astype(float)
 jer_dissolved_wgs = jer_dissolved.to_crs(epsg=4326)
 print(f"  Jerusalem tat-rova areas: {len(jer_dissolved)}")
@@ -58,8 +63,9 @@ def compute_stats(mode_codes):
             "n_commuters":     len(grp),
         })
 
-    stats = w_df.groupby(AREA_COL).apply(_agg).reset_index()
-    stats.rename(columns={AREA_COL: "TAT_ROVA_key"}, inplace=True)
+    stats = w_df.groupby([ROVA_COL, AREA_COL]).apply(_agg).reset_index()
+    stats.rename(columns={ROVA_COL: "ROVA_key", AREA_COL: "TAT_ROVA_key"}, inplace=True)
+    stats["ROVA_key"]     = stats["ROVA_key"].astype(float)
     stats["TAT_ROVA_key"] = stats["TAT_ROVA_key"].astype(float)
     return stats
 
@@ -79,11 +85,14 @@ def make_maps(stats, slug, title, folium_colors, mpl_cmap):
     cap     = stats["pct"].quantile(0.95)   # colour cap
     print(f"  Share range: {pct_min:.2f}% – {pct_max:.2f}%  (colour cap {cap:.2f}%)")
 
-    # Merge geometry + stats
-    merged = jer_dissolved.merge(stats, on="TAT_ROVA_key", how="left")
+    # Merge geometry + stats on composite key (ROVA, TAT_ROVA)
+    merged = jer_dissolved.merge(stats, on=["ROVA_key", "TAT_ROVA_key"], how="left")
     merged_wgs = merged.to_crs(epsg=4326)
 
     # Label columns for tooltip
+    merged_wgs["area_label"] = merged_wgs.apply(
+        lambda r: f"{int(r['ROVA_key'])} / {int(r['TAT_ROVA_key'])}", axis=1
+    )
     merged_wgs["pct_label"] = merged_wgs["pct"].apply(
         lambda x: f"{x:.2f}%" if pd.notna(x) else "No data"
     )
@@ -122,8 +131,8 @@ def make_maps(stats, slug, title, folium_colors, mpl_cmap):
         style_function=style_fn,
         highlight_function=highlight_fn,
         tooltip=folium.GeoJsonTooltip(
-            fields=["TAT_ROVA_key", "pct_label", "n_label"],
-            aliases=["Statistical area:", f"{title} share:", "Commuters in sample:"],
+            fields=["area_label", "pct_label", "n_label"],
+            aliases=["Rova / Tat-rova:", f"{title} share:", "Commuters in sample:"],
             localize=True,
             sticky=True,
             labels=True,
