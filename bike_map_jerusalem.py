@@ -1,12 +1,13 @@
 """
 Bike usage share by statistical area (tat-rova) in Jerusalem
 Based on Israel Census 2022 – Jerusalem public use file
-Transport code 8 = bicycle, 9 = electric bicycle / scooter
+Transport code 10 = bicycle, 9 = electric bicycle / scooter
+(Code 10 confirmed from STATA: gen bike = (emtzaehagaaikarimakomavdpuf == 10))
 
 Generates separate maps for:
-  • bicycle only (code 8)
+  • bicycle only (code 10)
   • e-bike / scooter only (code 9)
-  • both combined (codes 8 + 9)
+  • both combined (codes 9 + 10)
 """
 
 import pandas as pd
@@ -186,7 +187,7 @@ def make_maps(stats, slug, title, folium_colors, mpl_cmap):
 
 VARIANTS = [
     {
-        "codes":         {8},
+        "codes":         {10},
         "slug":          "bicycle",
         "title":         "Bicycle commuters",
         "folium_colors": ["#f7fcf5", "#c7e9c0", "#74c476", "#238b45", "#00441b"],
@@ -200,7 +201,7 @@ VARIANTS = [
         "mpl_cmap":      "Purples",
     },
     {
-        "codes":         {8, 9},
+        "codes":         {9, 10},
         "slug":          "combined",
         "title":         "Bicycle + e-bike / scooter commuters",
         "folium_colors": ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#084594"],
