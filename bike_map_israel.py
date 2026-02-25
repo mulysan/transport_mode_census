@@ -190,7 +190,7 @@ for _, row in combined.iterrows():
     if level == "sub_neighbourhood" and pd.notna(rova) and pd.notna(tat):
         area = f"Sub-neighbourhood {int(rova)}/{int(tat)}"
     elif level == "district" and pd.notna(tat):
-        area = f"District {int(tat)}"
+        area = f"Neighbourhood {int(tat)}"
     else:
         area = None
 
@@ -297,7 +297,7 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
     <div class="legend-ticks"><span>0%</span><span id="leg-cap">–</span></div>
     <div id="geo-note">
       Large cities: sub-neighbourhood level<br>
-      Medium cities: district level<br>
+      Medium cities: neighbourhood level<br>
       Small settlements: city level<br>
       Grey = no data
     </div>
