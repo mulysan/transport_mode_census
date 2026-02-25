@@ -1,0 +1,1 @@
+/home/user/census/ezorim_statistiim_2022
