@@ -1,339 +1,421 @@
 """
-All-Israel interactive transport mode choropleth map
-Israel Census 2022 – National public use file (census2022bike.csv)
+All-Israel interactive transport mode map
+Based on Israel Census 2022 national PUF (census/census2022bike.csv)
 
-Generates a single self-contained HTML with a dropdown to choose
-any of the 13 transport modes (codes 1–13).
+Geographic hierarchy (3 tiers):
+  Large cities  (19 settlements): sub-neighbourhood level  (SEMEL_YISH + ROVA + TAT_ROVA)
+  Medium cities (35 settlements): district level            (SEMEL_YISH + TAT_ROVA, no ROVA)
+  Small towns   (remaining)     : city level                (SEMEL_YISH only)
+
+Transport codes confirmed from CBS codebook / STATA:
+  1=Car driver, 2=Car passenger, 3=Public bus, 4=Light rail/metro,
+  5=Employer transport, 6=Israel Railways, 7=Service taxi, 8=Special taxi,
+  9=Motorcycle, 10=Bicycle, 11=Walking, 12=Truck, 13=Other
 """
 
 import json
+import numpy as np
 import pandas as pd
 import geopandas as gpd
-import numpy as np
+from shapely.geometry import mapping
 import warnings
 warnings.filterwarnings("ignore")
 
-# ── Transport mode labels ──────────────────────────────────────────────────────
-MODE_LABELS = {
-    1:  ("כנהג – במכונית פרטית/מסחרית",        "Private car / van – driver"),
-    2:  ("כנוסע – במכונית פרטית/מסחרית",       "Private car / van – passenger"),
-    3:  ("אוטובוס ציבורי",                        "Public bus"),
-    4:  ("רכבת קלה / מטרונית וכד׳",             "Light rail / metro"),
-    5:  ("הסעה מאורגנת ע״י מקום העבודה",         "Employer-organised transport"),
-    6:  ("רכבת ישראל",                            "Israel Railways"),
-    7:  ("מונית שירות",                           "Sherut taxi"),
-    8:  ("מונית ספיישל",                          "Special taxi"),
-    9:  ("כלי רכב דו-גלגלי מנועי (אופנוע וכד׳)", "Motorised 2-wheel vehicle (motorcycle etc.)"),
-    10: ("רכיבה על אופניים",                      "Bicycle"),
-    11: ("הליכה ברגל",                            "Walking"),
-    12: ("משאית",                                 "Truck"),
-    13: ("כלי רכב אחר",                          "Other vehicle"),
-}
-
-# Mode-specific sequential colour palettes (light → dark)
-MODE_COLORS = {
-    1:  ["#fff5eb", "#fdd0a2", "#fd8d3c", "#d94701", "#7f2704"],  # Oranges
-    2:  ["#fff5eb", "#fdd0a2", "#fd8d3c", "#d94701", "#7f2704"],  # Oranges (passenger)
-    3:  ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#084594"],  # Blues
-    4:  ["#f7f4f9", "#d4b9da", "#df65b0", "#ce1256", "#67001f"],  # Pinks
-    5:  ["#fff7fb", "#d0d1e6", "#74a9cf", "#0570b0", "#034e7b"],  # Steel blues
-    6:  ["#f7fcfd", "#b2e2e2", "#41ae76", "#006d2c", "#00441b"],  # Greens
-    7:  ["#ffffd9", "#c7e9b4", "#41b6c4", "#1d91c0", "#0c2c84"],  # Yellow-Blues
-    8:  ["#ffffcc", "#c7e9b4", "#7fcdbb", "#1d91c0", "#0c2c84"],  # Yellow-Blues2
-    9:  ["#fff7f3", "#fcc5c0", "#f768a1", "#ae017e", "#49006a"],  # Pinks/Purple
-    10: ["#f7fcf5", "#c7e9c0", "#74c476", "#238b45", "#00441b"],  # Greens (bike)
-    11: ["#fcfbfd", "#dadaeb", "#9e9ac8", "#6a51a3", "#3f007d"],  # Purples
-    12: ["#fffff4", "#d9f0a3", "#78c679", "#238443", "#004529"],  # YlGn
-    13: ["#fff5eb", "#fdd0a2", "#fdae6b", "#e6550d", "#a63603"],  # Oranges2
-}
-
+# ── Column aliases ─────────────────────────────────────────────────────────────
 TRANSPORT_COL = "emtzaehagaaikarimakomavdpuf"
-YISH_COL      = "smlyishuvpuf"
 ROVA_COL      = "rovaktvtmegurimpuf"
 AREA_COL      = "tatrovaktvtmegurimpuf"
+SETT_COL      = "smlyishuvpuf"
 WEIGHT_COL    = "mishkalpratpuf"
 
-# ── 1. Load census data ────────────────────────────────────────────────────────
-print("Loading census data …")
+TRANSPORT_MODES = {
+    1:  "Private car – driver",
+    2:  "Private car – passenger",
+    3:  "Public bus",
+    4:  "Light rail / metro",
+    5:  "Employer transport",
+    6:  "Israel Railways",
+    7:  "Service taxi (sherut)",
+    8:  "Special taxi",
+    9:  "Motorcycle / moped",
+    10: "Bicycle",
+    11: "Walking",
+    12: "Truck",
+    13: "Other vehicle",
+}
+
+# ── 1. Load census ─────────────────────────────────────────────────────────────
+print("Loading census data…")
 df = pd.read_csv("census/census2022bike.csv", encoding="utf-8-sig")
 df.columns = df.columns.str.lower().str.strip()
-print(f"  Total rows: {len(df):,}")
+print(f"  {len(df):,} rows total")
 
-# Keep only rows where transport mode is recorded
+# Keep only commuters (non-missing transport code) — matches STATA "replace . if missing"
 workers = df[df[TRANSPORT_COL].notna()].copy()
-print(f"  With transport mode recorded: {len(workers):,}")
+print(f"  {len(workers):,} commuters with recorded mode")
 
-# Fill NaN geographic sub-codes with 0 so small (single-tat-rova) settlements
-# are included in the groupby rather than silently dropped
-workers[ROVA_COL] = workers[ROVA_COL].fillna(0)
-workers[AREA_COL] = workers[AREA_COL].fillna(0)
-print(f"  Unique (settlement, rova, tat_rova) groups after filling NaN→0: "
-      f"{workers.groupby([YISH_COL, ROVA_COL, AREA_COL]).ngroups}")
+# Weighted mode dummies  (sum later → weighted proportion = STATA collapse [aweight])
+W = workers[WEIGHT_COL]
+for m in range(1, 14):
+    workers[f"wm_{m}"] = (workers[TRANSPORT_COL] == m) * W
+workers["w_tot"] = W
 
-# ── 2. Compute weighted share for all 13 modes in one pass ────────────────────
-print("Computing weighted shares for all 13 modes …")
-GROUP_COLS = [YISH_COL, ROVA_COL, AREA_COL]
+sum_cols = [f"wm_{m}" for m in range(1, 14)] + ["w_tot"]
 
-for c in range(1, 14):
-    workers[f"_is_{c}"] = (workers[TRANSPORT_COL] == c).astype(float)
+# Split into 3 geographic tiers
+w_large  = workers[workers[ROVA_COL].notna()]                                    # has ROVA
+w_medium = workers[workers[ROVA_COL].isna() & workers[AREA_COL].notna()]         # TAT_ROVA only
+w_small  = workers[workers[AREA_COL].isna()]                                     # neither
+print(f"  Commuter split → large:{len(w_large):,}  medium:{len(w_medium):,}  small:{len(w_small):,}")
 
-def _agg_all(grp):
-    w = grp[WEIGHT_COL]
-    total_w = w.sum()
-    result = {}
-    for c in range(1, 14):
-        target_w = (grp[f"_is_{c}"] * w).sum()
-        result[f"pct_{c}"] = round(target_w / total_w * 100, 4) if total_w > 0 else None
-    return pd.Series(result)
 
-print("  Running groupby (may take ~30s for 2M rows) …")
-stats = workers.groupby(GROUP_COLS, sort=False).apply(_agg_all).reset_index()
-stats.rename(columns={YISH_COL: "SEMEL_YISH_k", ROVA_COL: "ROVA_k", AREA_COL: "TAT_ROVA_k"}, inplace=True)
-for col in ["SEMEL_YISH_k", "ROVA_k", "TAT_ROVA_k"]:
-    stats[col] = pd.to_numeric(stats[col], errors="coerce")
-print(f"  Stats: {len(stats):,} (SEMEL_YISH, ROVA, TAT_ROVA) groups")
+# ── 2. Compute weighted mode shares per tier ───────────────────────────────────
+def compute_pcts(grp_df, grp_cols):
+    agg = grp_df.groupby(grp_cols)[sum_cols].sum().reset_index()
+    for m in range(1, 14):
+        agg[f"pct_{m}"] = (agg[f"wm_{m}"] / agg["w_tot"] * 100).round(3)
+    return agg
 
-# ── 3. Load & dissolve shapefile to (SEMEL_YISH, ROVA, TAT_ROVA) ─────────────
-print("Loading shapefile …")
-gdf = gpd.read_file("statistical_areas_2022/statistical_areas_2022.shp")
-print(f"  Total statistical area polygons: {len(gdf):,}")
+print("Computing mode shares…")
+stats_large  = compute_pcts(w_large,  [SETT_COL, ROVA_COL, AREA_COL])
+stats_medium = compute_pcts(w_medium, [SETT_COL, AREA_COL])
+stats_small  = compute_pcts(w_small,  [SETT_COL])
+print(f"  Stat groups → large:{len(stats_large)}  medium:{len(stats_medium)}  small:{len(stats_small)}")
 
-# Fill NaN ROVA/TAT_ROVA with 0 so small single-area settlements are kept
-gdf["ROVA"]     = pd.to_numeric(gdf["ROVA"],     errors="coerce").fillna(0)
-gdf["TAT_ROVA"] = pd.to_numeric(gdf["TAT_ROVA"], errors="coerce").fillna(0)
 
-gdf_diss = gdf.dissolve(by=["SEMEL_YISH", "ROVA", "TAT_ROVA"], aggfunc="first").reset_index()
-print(f"  After dissolve: {len(gdf_diss):,} (SEMEL_YISH, ROVA, TAT_ROVA) polygons")
+# ── 3. Load & dissolve shapefile ───────────────────────────────────────────────
+print("Loading shapefile (GDB)…")
+import os, pathlib
+gdb_path = "ezorim_statistiim_2022.gdb"
+if not os.path.exists(gdb_path):
+    os.symlink(str(pathlib.Path("ezorim_statistiim_2022").resolve()), gdb_path)
+gdf = gpd.read_file(gdb_path)
 
-# Simplify geometry (tolerance in metres – EPSG:2039)
-gdf_diss["geometry"] = gdf_diss["geometry"].simplify(50, preserve_topology=True)
+shp_large  = gdf[gdf["ROVA"].notna()].copy()
+shp_medium = gdf[gdf["ROVA"].isna() & gdf["TAT_ROVA"].notna()].copy()
+shp_small  = gdf[gdf["TAT_ROVA"].isna()].copy()
 
-# Convert to WGS84
-gdf_wgs = gdf_diss.to_crs(epsg=4326)
+print("Dissolving shapefile tiers…")
+diss_large  = shp_large.dissolve( by=["SEMEL_YISHUV", "ROVA", "TAT_ROVA"], aggfunc="first").reset_index()
+diss_medium = shp_medium.dissolve(by=["SEMEL_YISHUV", "TAT_ROVA"],          aggfunc="first").reset_index()
+diss_small  = shp_small.dissolve( by=["SEMEL_YISHUV"],                       aggfunc="first").reset_index()
+print(f"  Dissolved areas → large:{len(diss_large)}  medium:{len(diss_medium)}  small:{len(diss_small)}")
 
-# ── 4. Merge stats + geometry ─────────────────────────────────────────────────
-print("Merging stats with geometry …")
-gdf_wgs["SEMEL_YISH_k"] = pd.to_numeric(gdf_wgs["SEMEL_YISH"], errors="coerce")
-gdf_wgs["ROVA_k"]       = pd.to_numeric(gdf_wgs["ROVA"],       errors="coerce")
-gdf_wgs["TAT_ROVA_k"]   = pd.to_numeric(gdf_wgs["TAT_ROVA"],   errors="coerce")
 
-merged = gdf_wgs.merge(
-    stats,
-    on=["SEMEL_YISH_k", "ROVA_k", "TAT_ROVA_k"],
+# ── 4. Merge stats into dissolved shapes ───────────────────────────────────────
+pct_cols = [f"pct_{m}" for m in range(1, 14)]
+
+def to_float(df, cols):
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+# Large: (SEMEL_YISHUV, ROVA, TAT_ROVA)
+diss_large  = to_float(diss_large,  ["SEMEL_YISHUV", "ROVA", "TAT_ROVA"])
+stats_large = to_float(stats_large, [SETT_COL, ROVA_COL, AREA_COL])
+m_large = diss_large.merge(
+    stats_large[[SETT_COL, ROVA_COL, AREA_COL, "w_tot"] + pct_cols],
+    left_on=["SEMEL_YISHUV", "ROVA", "TAT_ROVA"],
+    right_on=[SETT_COL, ROVA_COL, AREA_COL],
     how="left",
 )
-print(f"  Merged: {len(merged):,} polygons "
-      f"({merged['pct_10'].notna().sum()} with bicycle data)")
+m_large["geo_level"] = "rova"
 
-# ── 5. Prepare GeoJSON ────────────────────────────────────────────────────────
-print("Preparing GeoJSON …")
-pct_cols = [f"pct_{c}" for c in range(1, 14)]
-keep = ["geometry", "SEMEL_YISH", "ROVA", "TAT_ROVA"] + pct_cols
-geo = merged[keep].copy()
+# Medium: (SEMEL_YISHUV, TAT_ROVA)
+diss_medium  = to_float(diss_medium,  ["SEMEL_YISHUV", "TAT_ROVA"])
+stats_medium = to_float(stats_medium, [SETT_COL, AREA_COL])
+m_medium = diss_medium.merge(
+    stats_medium[[SETT_COL, AREA_COL, "w_tot"] + pct_cols],
+    left_on=["SEMEL_YISHUV", "TAT_ROVA"],
+    right_on=[SETT_COL, AREA_COL],
+    how="left",
+)
+m_medium["geo_level"] = "tat_rova"
 
-# Replace NaN with None for clean JSON nulls
-for col in pct_cols:
-    geo[col] = geo[col].where(geo[col].notna(), other=None)
+# Small: (SEMEL_YISHUV)
+diss_small  = to_float(diss_small,  ["SEMEL_YISHUV"])
+stats_small = to_float(stats_small, [SETT_COL])
+m_small = diss_small.merge(
+    stats_small[[SETT_COL, "w_tot"] + pct_cols],
+    left_on=["SEMEL_YISHUV"],
+    right_on=[SETT_COL],
+    how="left",
+)
+m_small["geo_level"] = "city"
 
-geojson_str = geo.to_json(na="null")
+# Combine all tiers
+keep_cols = (
+    ["SEMEL_YISHUV", "SHEM_YISHUV", "SHEM_YISHUV_ENGLISH", "ROVA", "TAT_ROVA",
+     "geo_level", "geometry", "w_tot"]
+    + pct_cols
+)
 
-# ── 6. Per-mode 95th-percentile colour caps ───────────────────────────────────
+def slim(d):
+    return d[[c for c in keep_cols if c in d.columns]].copy()
+
+combined = pd.concat([slim(m_large), slim(m_medium), slim(m_small)], ignore_index=True)
+combined = gpd.GeoDataFrame(combined, crs=gdf.crs).to_crs(epsg=4326)
+
+# Simplify geometry to reduce HTML file size
+combined["geometry"] = combined["geometry"].simplify(0.0003, preserve_topology=True)
+print(f"  Combined areas: {len(combined)}")
+
+
+# ── 5. Build GeoJSON features ──────────────────────────────────────────────────
+def safe_float(v):
+    try:
+        f = float(v)
+        return None if np.isnan(f) else round(f, 3)
+    except Exception:
+        return None
+
+print("Building GeoJSON…")
+features = []
+for _, row in combined.iterrows():
+    geom = row["geometry"]
+    if geom is None or geom.is_empty:
+        continue
+
+    shem    = str(row.get("SHEM_YISHUV") or "")
+    shem_en = str(row.get("SHEM_YISHUV_ENGLISH") or "")
+    level   = row.get("geo_level", "city")
+    rova    = row.get("ROVA")
+    tat     = row.get("TAT_ROVA")
+
+    label = shem
+    if level == "rova" and pd.notna(rova) and pd.notna(tat):
+        label += f" | R{int(rova)}/T{int(tat)}"
+    elif level == "tat_rova" and pd.notna(tat):
+        label += f" | T{int(tat)}"
+
+    props = {
+        "label":   label,
+        "shem":    shem,
+        "shem_en": shem_en,
+        "level":   level,
+        "n":       safe_float(row.get("w_tot")),
+    }
+    for m in range(1, 14):
+        props[f"p{m}"] = safe_float(row.get(f"pct_{m}"))
+
+    features.append({
+        "type": "Feature",
+        "properties": props,
+        "geometry": mapping(geom),
+    })
+
+geojson_str = json.dumps(
+    {"type": "FeatureCollection", "features": features},
+    ensure_ascii=False,
+)
+print(f"  GeoJSON: {len(features)} features, ~{len(geojson_str)//1024} KB")
+
+
+# ── 6. Colour caps (95th percentile per mode) ──────────────────────────────────
 caps = {}
-for c in range(1, 14):
-    vals = merged[f"pct_{c}"].dropna()
-    caps[c] = round(float(vals.quantile(0.95)), 2) if len(vals) > 0 else 10.0
+for m in range(1, 14):
+    vals = combined[f"pct_{m}"].dropna()
+    caps[m] = float(round(vals.quantile(0.95), 2)) if len(vals) else 1.0
 
-# ── 7. Build option list for dropdown ────────────────────────────────────────
-option_lines = []
-for c in range(1, 14):
-    he, en = MODE_LABELS[c]
-    selected = ' selected' if c == 10 else ''
-    option_lines.append(f'      <option value="{c}"{selected}>{c} · {en} — {he}</option>')
-options_html = "\n".join(option_lines)
+caps_js  = json.dumps({str(k): v for k, v in caps.items()})
+modes_js = json.dumps({str(k): v for k, v in TRANSPORT_MODES.items()}, ensure_ascii=False)
 
-# ── 8. Serialise JS objects ───────────────────────────────────────────────────
-labels_js   = json.dumps({str(c): {"he": MODE_LABELS[c][0], "en": MODE_LABELS[c][1]} for c in range(1, 14)}, ensure_ascii=False)
-caps_js     = json.dumps({str(c): caps[c] for c in range(1, 14)})
-colors_js   = json.dumps({str(c): MODE_COLORS[c] for c in range(1, 14)})
 
-# ── 9. Write HTML (template-based to avoid f-string / JSON brace conflicts) ───
-print("Writing HTML …")
+# ── 7. Write HTML ──────────────────────────────────────────────────────────────
+print("Writing HTML…")
 
-HTML_TEMPLATE = r"""<!DOCTYPE html>
-<html lang="en">
+HTML = r"""<!DOCTYPE html>
+<html lang="he">
 <head>
-  <meta charset="UTF-8">
-  <title>Israel Census 2022 – Transport Mode by Tat-Rova</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/chroma-js/2.4.2/chroma.min.js"></script>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    #map { width: 100vw; height: 100vh; }
-
-    #controls {
-      position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
-      z-index: 1000; background: rgba(255,255,255,0.97); border-radius: 10px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.25); padding: 14px 18px;
-      min-width: 380px; max-width: 90vw;
-    }
-    #controls h2 {
-      font-size: 13px; color: #444; margin-bottom: 10px;
-      text-align: center; font-weight: 600; letter-spacing: 0.02em;
-    }
-    #mode-select {
-      width: 100%; padding: 8px 10px; font-size: 13px;
-      border: 1px solid #ccc; border-radius: 6px;
-      cursor: pointer; background: #fff; color: #222;
-    }
-    #controls .sub {
-      font-size: 11px; color: #888; text-align: center; margin-top: 6px;
-    }
-
-    #legend {
-      position: absolute; bottom: 28px; right: 12px; z-index: 1000;
-      background: rgba(255,255,255,0.96); border-radius: 8px;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.18); padding: 12px 14px;
-      min-width: 190px;
-    }
-    #legend h4 { font-size: 12px; color: #333; margin-bottom: 8px; font-weight: 600; }
-    #grad-bar { height: 14px; border-radius: 3px; }
-    .leg-labels {
-      display: flex; justify-content: space-between;
-      font-size: 11px; color: #666; margin-top: 4px;
-    }
-    .leg-note { font-size: 10px; color: #aaa; margin-top: 6px; }
-
-    #tip {
-      position: absolute; bottom: 28px; left: 12px; z-index: 1000;
-      background: rgba(255,255,255,0.96); border-radius: 8px;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.18); padding: 10px 14px;
-      font-size: 12px; color: #333; display: none; max-width: 260px;
-      pointer-events: none;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>Israel Census 2022 – Transport Mode Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display: flex; height: 100vh; overflow: hidden; }
+#map { flex: 1; }
+#panel {
+  width: 300px; flex-shrink: 0;
+  background: #1f2937; color: #d1d5db;
+  display: flex; flex-direction: column;
+  border-left: 1px solid #374151; overflow: hidden;
+}
+#panel-header { padding: 14px 14px 10px; border-bottom: 1px solid #374151; }
+#panel-header h1 { font-size: 13px; font-weight: 700; color: #f9fafb; line-height: 1.5; }
+#panel-header p  { font-size: 10px; color: #6b7280; margin-top: 3px; }
+#mode-list { flex: 1; overflow-y: auto; padding: 8px; }
+#mode-list::-webkit-scrollbar { width: 5px; }
+#mode-list::-webkit-scrollbar-track { background: #111827; }
+#mode-list::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+.mode-btn {
+  display: block; width: 100%; text-align: left;
+  padding: 7px 10px; margin: 2px 0;
+  border: 1px solid transparent; border-radius: 4px;
+  background: transparent; color: #9ca3af;
+  cursor: pointer; font-size: 12px; transition: all 0.12s;
+}
+.mode-btn:hover { background: #374151; color: #f3f4f6; border-color: #4b5563; }
+.mode-btn.active {
+  background: #1d4ed8; border-color: #2563eb;
+  color: #fff; font-weight: 600;
+}
+#panel-footer { padding: 10px 14px; border-top: 1px solid #374151; }
+#legend-title { font-size: 10px; color: #6b7280; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+#legend-bar {
+  height: 10px; border-radius: 3px; margin: 4px 0;
+  background: linear-gradient(to right, #ffffcc, #a1dab4, #41b6c4, #2c7fb8, #253494);
+}
+.legend-ticks { display: flex; justify-content: space-between; font-size: 10px; color: #6b7280; }
+#geo-note { margin-top: 8px; font-size: 10px; color: #4b5563; line-height: 1.5; }
+.leaflet-tooltip {
+  background: #1f2937 !important; border: 1px solid #374151 !important;
+  border-radius: 6px !important; color: #d1d5db !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important; padding: 8px 12px !important;
+}
+.leaflet-tooltip::before { display: none !important; }
+</style>
 </head>
 <body>
-  <div id="map"></div>
 
-  <div id="controls">
-    <h2>Israel Census 2022 · Transport Mode to Work</h2>
-    <select id="mode-select">
-__OPTIONS__
-    </select>
-    <div class="sub">Weighted share of commuters (%) · by tat-rova sub-neighbourhood</div>
+<div id="map"></div>
+
+<div id="panel">
+  <div id="panel-header">
+    <h1>Israel Census 2022<br>Transport Mode to Work</h1>
+    <p>Share of commuters (%) by area</p>
   </div>
-
-  <div id="legend">
-    <h4 id="leg-title">Bicycle share (%)</h4>
-    <div id="grad-bar"></div>
-    <div class="leg-labels"><span>0 %</span><span id="leg-max"></span></div>
-    <div class="leg-note">Grey = no data / not in sample</div>
+  <div id="mode-list"></div>
+  <div id="panel-footer">
+    <div id="legend-title">Share of commuters</div>
+    <div id="legend-bar"></div>
+    <div class="legend-ticks"><span>0%</span><span id="leg-cap">–</span></div>
+    <div id="geo-note">
+      Large cities: sub-neighbourhood level<br>
+      Medium cities: district (tat-rova) level<br>
+      Small settlements: city level<br>
+      Grey = no data
+    </div>
   </div>
+</div>
 
-  <div id="tip"></div>
+<script>
+var CAPS  = __CAPS__;
+var MODES = __MODES__;
+var DATA  = __DATA__;
 
-  <script>
-    const GEOJSON  = __GEOJSON__;
-    const LABELS   = __LABELS__;
-    const CAPS     = __CAPS__;
-    const PALETTES = __COLORS__;
+var currentMode = 10;
 
-    const map = L.map('map', { zoomControl: true })
-      .setView([31.5, 34.9], 8);
+var map = L.map('map', { preferCanvas: true }).setView([31.5, 34.9], 8);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com">CARTO</a>',
+  subdomains: 'abcd', maxZoom: 19
+}).addTo(map);
 
-    L.tileLayer(
-      'https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png',
-      { attribution: '&copy; <a href="https://carto.com/">CARTO</a>', subdomains: 'abcd', maxZoom: 19 }
-    ).addTo(map);
+// 5-stop sequential colour ramp (YlGnBu)
+var RAMP = ['#ffffcc', '#a1dab4', '#41b6c4', '#2c7fb8', '#253494'];
 
-    let layer = null;
-    let currentMode = '10';
+function hexToRgb(h) {
+  return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+}
+function getColor(pct, cap) {
+  if (pct == null) return '#6b7280';
+  var t = Math.min(pct / (cap || 1), 1);
+  var n = RAMP.length - 1;
+  var i = Math.min(Math.floor(t * n), n - 1);
+  var f = t * n - i;
+  var a = hexToRgb(RAMP[i]), b = hexToRgb(RAMP[i + 1]);
+  return 'rgb(' +
+    Math.round(a[0] + (b[0]-a[0])*f) + ',' +
+    Math.round(a[1] + (b[1]-a[1])*f) + ',' +
+    Math.round(a[2] + (b[2]-a[2])*f) + ')';
+}
 
-    function getColor(mode, pct) {
-      if (pct == null || isNaN(pct)) return '#cccccc';
-      const cap    = CAPS[mode] || 10;
-      const colors = PALETTES[mode] || PALETTES['1'];
-      return chroma.scale(colors).domain([0, cap])(Math.min(pct, cap)).hex();
-    }
+function styleFn(feature) {
+  var p   = feature.properties['p' + currentMode];
+  var cap = CAPS[String(currentMode)];
+  return {
+    fillColor:   getColor(p, cap),
+    weight:      0.4,
+    color:       '#555',
+    opacity:     0.8,
+    fillOpacity: (p == null) ? 0.2 : 0.72,
+  };
+}
 
-    function styleFn(feature) {
-      const pct = feature.properties['pct_' + currentMode];
-      return {
-        fillColor: getColor(currentMode, pct),
-        color: '#666', weight: 0.4, fillOpacity: 0.78,
-      };
-    }
-
-    function onEach(feature, lyr) {
-      lyr.on({
-        mouseover: function(e) {
-          e.target.setStyle({ weight: 2, color: '#111', fillOpacity: 0.95 });
-          const p   = feature.properties;
-          const pct = p['pct_' + currentMode];
-          const lbl = LABELS[currentMode];
-          const tip = document.getElementById('tip');
-          tip.style.display = 'block';
-          tip.innerHTML =
-            '<b>Settlement ' + p.SEMEL_YISH +
-            ' · Rova ' + p.ROVA +
-            ' · Tat-rova ' + p.TAT_ROVA + '</b><br>' +
-            lbl.en + '<br>' +
-            '<span dir="rtl">' + lbl.he + '</span><br>' +
-            '<b>' + (pct != null && !isNaN(pct) ? pct.toFixed(2) + ' %' : 'No data') + '</b>';
-        },
-        mouseout: function(e) {
-          layer.resetStyle(e.target);
-          document.getElementById('tip').style.display = 'none';
-        },
-        click: function(e) { map.fitBounds(e.target.getBounds()); },
-      });
-    }
-
-    function updateMode(mode) {
-      currentMode = String(mode);
-      const lbl  = LABELS[currentMode];
-      const cap  = CAPS[currentMode] || 10;
-      const pal  = PALETTES[currentMode] || PALETTES['1'];
-
-      // Legend
-      document.getElementById('leg-title').textContent = lbl.en + ' (%)';
-      document.getElementById('leg-max').textContent = cap.toFixed(1) + ' %';
-      document.getElementById('grad-bar').style.background =
-        'linear-gradient(to right, ' + pal[0] + ', ' + pal[2] + ', ' + pal[4] + ')';
-
-      // Recolour
-      if (layer) layer.setStyle(styleFn);
-    }
-
-    // Build layer once
-    layer = L.geoJSON(GEOJSON, { style: styleFn, onEachFeature: onEach }).addTo(map);
-
-    // Initialise legend
-    updateMode(10);
-
-    document.getElementById('mode-select').addEventListener('change', function() {
-      updateMode(this.value);
+var geojsonLayer = L.geoJSON(DATA, {
+  style: styleFn,
+  onEachFeature: function(feature, layer) {
+    var p = feature.properties;
+    layer.on({
+      mouseover: function(e) {
+        e.target.setStyle({ weight: 2, color: '#fff', fillOpacity: 0.92 });
+        var pct    = p['p' + currentMode];
+        var pctStr = (pct != null) ? pct.toFixed(2) + '%' : 'No data';
+        var nStr   = (p.n != null) ? Math.round(p.n).toLocaleString() : '—';
+        var geoLabels = { rova: 'Sub-neighbourhood', tat_rova: 'District', city: 'City' };
+        var geo = geoLabels[p.level] || '';
+        layer.bindTooltip(
+          '<div style="min-width:170px;line-height:1.7">' +
+          '<b style="font-size:13px">' + (p.shem || p.label) + '</b>' +
+          (p.shem_en && p.shem_en !== 'None' && p.shem_en !== p.shem
+            ? '<br><span style="font-size:11px;color:#9ca3af">' + p.shem_en + '</span>' : '') +
+          '<hr style="border:none;border-top:1px solid #374151;margin:5px 0">' +
+          '<span style="font-size:10px;color:#9ca3af">' + geo + '</span><br>' +
+          MODES[String(currentMode)] + ':<br>' +
+          '<b style="font-size:14px">' + pctStr + '</b><br>' +
+          '<span style="font-size:10px;color:#9ca3af">Weighted commuters: ' + nStr + '</span>' +
+          '</div>',
+          { sticky: true }
+        ).openTooltip();
+      },
+      mouseout: function(e) {
+        geojsonLayer.resetStyle(e.target);
+        e.target.closeTooltip();
+      },
     });
-  </script>
+  },
+}).addTo(map);
+
+function updateMap() {
+  geojsonLayer.setStyle(styleFn);
+  var cap = CAPS[String(currentMode)];
+  document.getElementById('leg-cap').textContent = cap.toFixed(1) + '%';
+  document.querySelectorAll('.mode-btn').forEach(function(b) {
+    b.classList.toggle('active', +b.dataset.mode === currentMode);
+  });
+}
+
+// Build mode buttons
+var list = document.getElementById('mode-list');
+Object.keys(MODES).map(Number).sort(function(a,b){return a-b;}).forEach(function(m) {
+  var btn = document.createElement('button');
+  btn.className = 'mode-btn' + (m === currentMode ? ' active' : '');
+  btn.dataset.mode = m;
+  btn.textContent = m + '. ' + MODES[m];
+  btn.onclick = function() { currentMode = m; updateMap(); };
+  list.appendChild(btn);
+});
+
+// Initialise legend cap
+document.getElementById('leg-cap').textContent = CAPS[String(currentMode)].toFixed(1) + '%';
+</script>
 </body>
 </html>
 """
 
-html = (HTML_TEMPLATE
-        .replace("__OPTIONS__",  options_html)
-        .replace("__GEOJSON__",  geojson_str)
-        .replace("__LABELS__",   labels_js)
-        .replace("__CAPS__",     caps_js)
-        .replace("__COLORS__",   colors_js))
+html_out = (
+    HTML
+    .replace("__CAPS__",  caps_js)
+    .replace("__MODES__", modes_js)
+    .replace("__DATA__",  geojson_str)
+)
 
-out_path = "transport_mode_israel.html"
+out_path = "bike_map_israel.html"
 with open(out_path, "w", encoding="utf-8") as f:
-    f.write(html)
+    f.write(html_out)
 
-import os
-size_mb = os.path.getsize(out_path) / 1_048_576
-print(f"  Saved → {out_path}  ({size_mb:.1f} MB)")
-print("\nDone ✓")
+size_mb = len(html_out) / 1_048_576
+print(f"Saved → {out_path}  ({size_mb:.1f} MB)")
+print("Done ✓")
