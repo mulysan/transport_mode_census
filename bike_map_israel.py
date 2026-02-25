@@ -120,7 +120,7 @@ m_large = diss_large.merge(
     right_on=[SETT_COL, ROVA_COL, AREA_COL],
     how="left",
 )
-m_large["geo_level"] = "rova"
+m_large["geo_level"] = "sub_neighbourhood"
 
 # Medium: (SEMEL_YISHUV, TAT_ROVA)
 diss_medium  = to_float(diss_medium,  ["SEMEL_YISHUV", "TAT_ROVA"])
@@ -131,7 +131,7 @@ m_medium = diss_medium.merge(
     right_on=[SETT_COL, AREA_COL],
     how="left",
 )
-m_medium["geo_level"] = "tat_rova"
+m_medium["geo_level"] = "district"
 
 # Small: (SEMEL_YISHUV)
 diss_small  = to_float(diss_small,  ["SEMEL_YISHUV"])
@@ -177,24 +177,28 @@ for _, row in combined.iterrows():
     if geom is None or geom.is_empty:
         continue
 
-    shem    = str(row.get("SHEM_YISHUV") or "")
-    shem_en = str(row.get("SHEM_YISHUV_ENGLISH") or "")
-    level   = row.get("geo_level", "city")
-    rova    = row.get("ROVA")
-    tat     = row.get("TAT_ROVA")
+    # City name: prefer English, keep Hebrew if no English available
+    city_en = str(row.get("SHEM_YISHUV_ENGLISH") or "").strip()
+    city_he = str(row.get("SHEM_YISHUV") or "").strip()
+    city    = city_en if city_en else city_he   # English first; Hebrew fallback
 
-    label = shem
-    if level == "rova" and pd.notna(rova) and pd.notna(tat):
-        label += f" | R{int(rova)}/T{int(tat)}"
-    elif level == "tat_rova" and pd.notna(tat):
-        label += f" | T{int(tat)}"
+    level = row.get("geo_level", "city")
+    rova  = row.get("ROVA")
+    tat   = row.get("TAT_ROVA")
+
+    # Area qualifier (English, numeric) shown below city name in tooltip
+    if level == "sub_neighbourhood" and pd.notna(rova) and pd.notna(tat):
+        area = f"Sub-neighbourhood {int(rova)}/{int(tat)}"
+    elif level == "district" and pd.notna(tat):
+        area = f"District {int(tat)}"
+    else:
+        area = None
 
     props = {
-        "label":   label,
-        "shem":    shem,
-        "shem_en": shem_en,
-        "level":   level,
-        "n":       safe_float(row.get("w_tot")),
+        "city":  city,
+        "area":  area,
+        "level": level,
+        "n":     safe_float(row.get("w_tot")),
     }
     for m in range(1, 14):
         props[f"p{m}"] = safe_float(row.get(f"pct_{m}"))
@@ -226,7 +230,7 @@ modes_js = json.dumps({str(k): v for k, v in TRANSPORT_MODES.items()}, ensure_as
 print("Writing HTML…")
 
 HTML = r"""<!DOCTYPE html>
-<html lang="he">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>Israel Census 2022 – Transport Mode Map</title>
@@ -293,7 +297,7 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
     <div class="legend-ticks"><span>0%</span><span id="leg-cap">–</span></div>
     <div id="geo-note">
       Large cities: sub-neighbourhood level<br>
-      Medium cities: district (tat-rova) level<br>
+      Medium cities: district level<br>
       Small settlements: city level<br>
       Grey = no data
     </div>
@@ -354,15 +358,11 @@ var geojsonLayer = L.geoJSON(DATA, {
         var pct    = p['p' + currentMode];
         var pctStr = (pct != null) ? pct.toFixed(2) + '%' : 'No data';
         var nStr   = (p.n != null) ? Math.round(p.n).toLocaleString() : '—';
-        var geoLabels = { rova: 'Sub-neighbourhood', tat_rova: 'District', city: 'City' };
-        var geo = geoLabels[p.level] || '';
         layer.bindTooltip(
-          '<div style="min-width:170px;line-height:1.7">' +
-          '<b style="font-size:13px">' + (p.shem || p.label) + '</b>' +
-          (p.shem_en && p.shem_en !== 'None' && p.shem_en !== p.shem
-            ? '<br><span style="font-size:11px;color:#9ca3af">' + p.shem_en + '</span>' : '') +
+          '<div style="min-width:180px;line-height:1.7">' +
+          '<b style="font-size:13px">' + (p.city || '—') + '</b>' +
+          (p.area ? '<br><span style="font-size:11px;color:#9ca3af">' + p.area + '</span>' : '') +
           '<hr style="border:none;border-top:1px solid #374151;margin:5px 0">' +
-          '<span style="font-size:10px;color:#9ca3af">' + geo + '</span><br>' +
           MODES[String(currentMode)] + ':<br>' +
           '<b style="font-size:14px">' + pctStr + '</b><br>' +
           '<span style="font-size:10px;color:#9ca3af">Weighted commuters: ' + nStr + '</span>' +
@@ -412,7 +412,7 @@ html_out = (
     .replace("__DATA__",  geojson_str)
 )
 
-out_path = "bike_map_israel.html"
+out_path = "transport_mode_israel.html"
 with open(out_path, "w", encoding="utf-8") as f:
     f.write(html_out)
 
