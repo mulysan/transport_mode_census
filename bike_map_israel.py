@@ -1,19 +1,17 @@
 """
-All-Israel interactive transport mode map
-Based on Israel Census 2022 national PUF (census/census2022bike.csv)
+All-Israel interactive transport mode map – 2008 and 2022 census
+Based on Israel CBS Census public-use files
 
-Geographic hierarchy (3 tiers):
-  Large cities  (19 settlements): sub-neighbourhood level  (SEMEL_YISH + ROVA + TAT_ROVA)
-  Medium cities (35 settlements): district level            (SEMEL_YISH + TAT_ROVA, no ROVA)
-  Small towns   (remaining)     : city level                (SEMEL_YISH only)
+Geometry: 2022 statistical areas (ezorim_statistiim_2022 GDB) used for both years.
+          ~85% of 2008 large-city sub-areas match 2022 boundaries; the rest show grey.
 
-Transport codes confirmed from CBS codebook / STATA:
-  1=Car driver, 2=Car passenger, 3=Public bus, 4=Light rail/metro,
-  5=Employer transport, 6=Israel Railways, 7=Service taxi, 8=Special taxi,
-  9=Motorcycle, 10=Bicycle, 11=Walking, 12=Truck, 13=Other
+Transport modes are aligned across years by name; code numbers differ between censuses.
+2008 codes 98 (children 0-14) and 99 (unknown) are excluded as non-commuters.
 """
 
 import json
+import os
+import pathlib
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -21,89 +19,114 @@ from shapely.geometry import mapping
 import warnings
 warnings.filterwarnings("ignore")
 
-# ── Column aliases ─────────────────────────────────────────────────────────────
-TRANSPORT_COL = "emtzaehagaaikarimakomavdpuf"
-ROVA_COL      = "rovaktvtmegurimpuf"
-AREA_COL      = "tatrovaktvtmegurimpuf"
-SETT_COL      = "smlyishuvpuf"
-WEIGHT_COL    = "mishkalpratpuf"
+# ── Shared geographic column names (same in both census files) ────────────────
+SETT_COL = "smlyishuvpuf"
+ROVA_COL = "rovaktvtmegurimpuf"
+AREA_COL = "tatrovaktvtmegurimpuf"
 
-TRANSPORT_MODES = {
-    1:  "Private car – driver",
-    2:  "Private car – passenger",
-    3:  "Public bus",
-    4:  "Light rail / metro",
-    5:  "Employer transport",
-    6:  "Israel Railways",
-    7:  "Service taxi (sherut)",
-    8:  "Special taxi",
-    9:  "Motorcycle / moped",
-    10: "Bicycle",
-    11: "Walking",
-    12: "Truck",
-    13: "Other vehicle",
+# ── Per-year census config ────────────────────────────────────────────────────
+YEAR_CFG = {
+    2008: {
+        "file":          "census/census2008bike.csv",
+        "transport_col": "emtzaehagaaikarimakomavdmchvpuf",
+        "weight_col":    "mishkalpuf",
+        "exclude_codes": {98, 99},   # children / unknown
+    },
+    2022: {
+        "file":          "census/census2022bike.csv",
+        "transport_col": "emtzaehagaaikarimakomavdpuf",
+        "weight_col":    "mishkalpratpuf",
+        "exclude_codes": set(),
+    },
 }
 
-# ── 1. Load census ─────────────────────────────────────────────────────────────
-print("Loading census data…")
-df = pd.read_csv("census/census2022bike.csv", encoding="utf-8-sig")
-df.columns = df.columns.str.lower().str.strip()
-print(f"  {len(df):,} rows total")
-
-# Keep only commuters (non-missing transport code) — matches STATA "replace . if missing"
-workers = df[df[TRANSPORT_COL].notna()].copy()
-print(f"  {len(workers):,} commuters with recorded mode")
-
-# Weighted mode dummies  (sum later → weighted proportion = STATA collapse [aweight])
-W = workers[WEIGHT_COL]
-for m in range(1, 14):
-    workers[f"wm_{m}"] = (workers[TRANSPORT_COL] == m) * W
-workers["w_tot"] = W
-
-sum_cols = [f"wm_{m}" for m in range(1, 14)] + ["w_tot"]
-
-# Split into 3 geographic tiers
-w_large  = workers[workers[ROVA_COL].notna()]                                    # has ROVA
-w_medium = workers[workers[ROVA_COL].isna() & workers[AREA_COL].notna()]         # TAT_ROVA only
-w_small  = workers[workers[AREA_COL].isna()]                                     # neither
-print(f"  Commuter split → large:{len(w_large):,}  medium:{len(w_medium):,}  small:{len(w_small):,}")
+# ── Aligned transport modes (codes differ by year) ────────────────────────────
+# slug: short key used in GeoJSON properties  (e.g. "bicycle" → p08_bicycle)
+# 2008/2022: transport code for that year, or None if mode didn't exist
+MODES = [
+    {"slug": "car_driver",  "label": "Private car – driver",     2008: 1,    2022: 1 },
+    {"slug": "car_pass",    "label": "Private car – passenger",   2008: 2,    2022: 2 },
+    {"slug": "bus",         "label": "Public bus",                2008: 3,    2022: 3 },
+    {"slug": "light_rail",  "label": "Light rail / metro",        2008: None, 2022: 4 },
+    {"slug": "employer",    "label": "Employer transport",         2008: 4,    2022: 5 },
+    {"slug": "train",       "label": "Israel Railways",            2008: 5,    2022: 6 },
+    {"slug": "taxi_svc",    "label": "Service taxi",               2008: 6,    2022: 7 },
+    {"slug": "taxi_sp",     "label": "Special taxi",               2008: 7,    2022: 8 },
+    {"slug": "moto",        "label": "Motorcycle / moped",         2008: 8,    2022: 9 },
+    {"slug": "bicycle",     "label": "Bicycle",                   2008: 9,    2022: 10},
+    {"slug": "walking",     "label": "Walking",                   2008: 10,   2022: 11},
+    {"slug": "truck",       "label": "Truck",                     2008: 11,   2022: 12},
+    {"slug": "other",       "label": "Other vehicle",             2008: 12,   2022: 13},
+]
+SLUGS = [m["slug"] for m in MODES]
 
 
-# ── 2. Compute weighted mode shares per tier ───────────────────────────────────
-def compute_pcts(grp_df, grp_cols):
-    agg = grp_df.groupby(grp_cols)[sum_cols].sum().reset_index()
-    for m in range(1, 14):
-        agg[f"pct_{m}"] = (agg[f"wm_{m}"] / agg["w_tot"] * 100).round(3)
-    return agg
+# ── 1. Compute mode shares for one year ───────────────────────────────────────
+def load_year_stats(year):
+    cfg = YEAR_CFG[year]
+    print(f"\n[{year}] Loading {cfg['file']} …")
+    df = pd.read_csv(cfg["file"])
+    df.columns = df.columns.str.lower().str.strip()
 
-print("Computing mode shares…")
-stats_large  = compute_pcts(w_large,  [SETT_COL, ROVA_COL, AREA_COL])
-stats_medium = compute_pcts(w_medium, [SETT_COL, AREA_COL])
-stats_small  = compute_pcts(w_small,  [SETT_COL])
-print(f"  Stat groups → large:{len(stats_large)}  medium:{len(stats_medium)}  small:{len(stats_small)}")
+    tc = cfg["transport_col"]
+    wc = cfg["weight_col"]
+
+    # Commuters: non-null transport, excluding special non-commuter codes
+    mask = df[tc].notna() & ~df[tc].isin(cfg["exclude_codes"])
+    workers = df[mask].copy()
+    print(f"  {len(workers):,} commuters")
+
+    W = workers[wc]
+    # Weighted mode dummies per slug
+    for m in MODES:
+        code = m[year]
+        workers[f"wm_{m['slug']}"] = ((workers[tc] == code) * W) if code else 0.0
+    workers["w_tot"] = W
+
+    wm_cols  = [f"wm_{s}" for s in SLUGS]
+    sum_cols = wm_cols + ["w_tot"]
+
+    def compute(grp_df, grp_cols):
+        agg = grp_df.groupby(grp_cols)[sum_cols].sum().reset_index()
+        for s in SLUGS:
+            agg[f"pct_{s}"] = (agg[f"wm_{s}"] / agg["w_tot"] * 100).round(3)
+        return agg
+
+    w_large  = workers[workers[ROVA_COL].notna()]
+    w_medium = workers[workers[ROVA_COL].isna() & workers[AREA_COL].notna()]
+    w_small  = workers[workers[AREA_COL].isna()]
+
+    stats = {
+        "large":  compute(w_large,  [SETT_COL, ROVA_COL, AREA_COL]),
+        "medium": compute(w_medium, [SETT_COL, AREA_COL]),
+        "small":  compute(w_small,  [SETT_COL]),
+    }
+    print(f"  Groups: large={len(stats['large'])}, "
+          f"medium={len(stats['medium'])}, small={len(stats['small'])}")
+    return stats
 
 
-# ── 3. Load & dissolve shapefile ───────────────────────────────────────────────
-print("Loading shapefile (GDB)…")
-import os, pathlib
-gdb_path = "ezorim_statistiim_2022.gdb"
-if not os.path.exists(gdb_path):
-    os.symlink(str(pathlib.Path("ezorim_statistiim_2022").resolve()), gdb_path)
-gdf = gpd.read_file(gdb_path)
+# ── 2. Load & dissolve shapefile (done once, used for both years) ─────────────
+def load_shapes():
+    gdb = "ezorim_statistiim_2022.gdb"
+    if not os.path.exists(gdb):
+        os.symlink(str(pathlib.Path("ezorim_statistiim_2022").resolve()), gdb)
+    print("\nLoading shapefile …")
+    gdf = gpd.read_file(gdb)
 
-shp_large  = gdf[gdf["ROVA"].notna()].copy()
-shp_medium = gdf[gdf["ROVA"].isna() & gdf["TAT_ROVA"].notna()].copy()
-shp_small  = gdf[gdf["TAT_ROVA"].isna()].copy()
+    shp_large  = gdf[gdf["ROVA"].notna()].copy()
+    shp_medium = gdf[gdf["ROVA"].isna() & gdf["TAT_ROVA"].notna()].copy()
+    shp_small  = gdf[gdf["TAT_ROVA"].isna()].copy()
 
-print("Dissolving shapefile tiers…")
-diss_large  = shp_large.dissolve( by=["SEMEL_YISHUV", "ROVA", "TAT_ROVA"], aggfunc="first").reset_index()
-diss_medium = shp_medium.dissolve(by=["SEMEL_YISHUV", "TAT_ROVA"],          aggfunc="first").reset_index()
-diss_small  = shp_small.dissolve( by=["SEMEL_YISHUV"],                       aggfunc="first").reset_index()
-print(f"  Dissolved areas → large:{len(diss_large)}  medium:{len(diss_medium)}  small:{len(diss_small)}")
+    diss_large  = shp_large.dissolve( by=["SEMEL_YISHUV","ROVA","TAT_ROVA"], aggfunc="first").reset_index()
+    diss_medium = shp_medium.dissolve(by=["SEMEL_YISHUV","TAT_ROVA"],         aggfunc="first").reset_index()
+    diss_small  = shp_small.dissolve( by=["SEMEL_YISHUV"],                    aggfunc="first").reset_index()
+    print(f"  Dissolved: large={len(diss_large)}, medium={len(diss_medium)}, small={len(diss_small)}")
+    return gdf.crs, diss_large, diss_medium, diss_small
 
 
-# ── 4. Merge stats into dissolved shapes ───────────────────────────────────────
-pct_cols = [f"pct_{m}" for m in range(1, 14)]
+# ── 3. Merge one year's stats into the dissolved shapes ──────────────────────
+PCT_COLS = [f"pct_{s}" for s in SLUGS]
 
 def to_float(df, cols):
     for c in cols:
@@ -111,58 +134,40 @@ def to_float(df, cols):
             df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
-# Large: (SEMEL_YISHUV, ROVA, TAT_ROVA)
-diss_large  = to_float(diss_large,  ["SEMEL_YISHUV", "ROVA", "TAT_ROVA"])
-stats_large = to_float(stats_large, [SETT_COL, ROVA_COL, AREA_COL])
-m_large = diss_large.merge(
-    stats_large[[SETT_COL, ROVA_COL, AREA_COL, "w_tot"] + pct_cols],
-    left_on=["SEMEL_YISHUV", "ROVA", "TAT_ROVA"],
-    right_on=[SETT_COL, ROVA_COL, AREA_COL],
-    how="left",
-)
-m_large["geo_level"] = "sub_neighbourhood"
+def merge_year(diss_large, diss_medium, diss_small, stats, year):
+    sl, sm, ss = (d.copy() for d in (diss_large, diss_medium, diss_small))
 
-# Medium: (SEMEL_YISHUV, TAT_ROVA)
-diss_medium  = to_float(diss_medium,  ["SEMEL_YISHUV", "TAT_ROVA"])
-stats_medium = to_float(stats_medium, [SETT_COL, AREA_COL])
-m_medium = diss_medium.merge(
-    stats_medium[[SETT_COL, AREA_COL, "w_tot"] + pct_cols],
-    left_on=["SEMEL_YISHUV", "TAT_ROVA"],
-    right_on=[SETT_COL, AREA_COL],
-    how="left",
-)
-m_medium["geo_level"] = "district"
+    to_float(sl, ["SEMEL_YISHUV","ROVA","TAT_ROVA"])
+    to_float(sm, ["SEMEL_YISHUV","TAT_ROVA"])
+    to_float(ss, ["SEMEL_YISHUV"])
+    to_float(stats["large"],  [SETT_COL, ROVA_COL, AREA_COL])
+    to_float(stats["medium"], [SETT_COL, AREA_COL])
+    to_float(stats["small"],  [SETT_COL])
 
-# Small: (SEMEL_YISHUV)
-diss_small  = to_float(diss_small,  ["SEMEL_YISHUV"])
-stats_small = to_float(stats_small, [SETT_COL])
-m_small = diss_small.merge(
-    stats_small[[SETT_COL, "w_tot"] + pct_cols],
-    left_on=["SEMEL_YISHUV"],
-    right_on=[SETT_COL],
-    how="left",
-)
-m_small["geo_level"] = "city"
+    ml = sl.merge(stats["large"] [[SETT_COL,ROVA_COL,AREA_COL,"w_tot"]+PCT_COLS],
+                  left_on=["SEMEL_YISHUV","ROVA","TAT_ROVA"],
+                  right_on=[SETT_COL,ROVA_COL,AREA_COL], how="left")
+    ml["geo_level"] = "sub_neighbourhood"
 
-# Combine all tiers
-keep_cols = (
-    ["SEMEL_YISHUV", "SHEM_YISHUV", "SHEM_YISHUV_ENGLISH", "ROVA", "TAT_ROVA",
-     "geo_level", "geometry", "w_tot"]
-    + pct_cols
-)
+    mm = sm.merge(stats["medium"][[SETT_COL,AREA_COL,"w_tot"]+PCT_COLS],
+                  left_on=["SEMEL_YISHUV","TAT_ROVA"],
+                  right_on=[SETT_COL,AREA_COL], how="left")
+    mm["geo_level"] = "neighbourhood"
 
-def slim(d):
-    return d[[c for c in keep_cols if c in d.columns]].copy()
+    ms = ss.merge(stats["small"] [[SETT_COL,"w_tot"]+PCT_COLS],
+                  left_on=["SEMEL_YISHUV"], right_on=[SETT_COL], how="left")
+    ms["geo_level"] = "city"
 
-combined = pd.concat([slim(m_large), slim(m_medium), slim(m_small)], ignore_index=True)
-combined = gpd.GeoDataFrame(combined, crs=gdf.crs).to_crs(epsg=4326)
-
-# Simplify geometry to reduce HTML file size
-combined["geometry"] = combined["geometry"].simplify(0.0003, preserve_topology=True)
-print(f"  Combined areas: {len(combined)}")
+    keep = ["SEMEL_YISHUV","SHEM_YISHUV","SHEM_YISHUV_ENGLISH","ROVA","TAT_ROVA",
+            "geo_level","geometry","w_tot"] + PCT_COLS
+    combined = pd.concat(
+        [d[[c for c in keep if c in d.columns]] for d in (ml, mm, ms)],
+        ignore_index=True
+    )
+    return combined
 
 
-# ── 5. Build GeoJSON features ──────────────────────────────────────────────────
+# ── 4. Build GeoJSON with both years' data ────────────────────────────────────
 def safe_float(v):
     try:
         f = float(v)
@@ -170,65 +175,97 @@ def safe_float(v):
     except Exception:
         return None
 
-print("Building GeoJSON…")
-features = []
-for _, row in combined.iterrows():
-    geom = row["geometry"]
-    if geom is None or geom.is_empty:
-        continue
+def build_geojson(combined_08, combined_22, crs):
+    # Reproject and simplify 2022 (canonical geometry)
+    geo22 = gpd.GeoDataFrame(combined_22, crs=crs).to_crs(epsg=4326)
+    geo22["geometry"] = geo22["geometry"].simplify(0.0003, preserve_topology=True)
 
-    # City name: prefer English, keep Hebrew if no English available
-    city_en = str(row.get("SHEM_YISHUV_ENGLISH") or "").strip()
-    city_he = str(row.get("SHEM_YISHUV") or "").strip()
-    city    = city_en if city_en else city_he   # English first; Hebrew fallback
+    # Build per-area lookup for 2008 stats (match on SEMEL_YISHUV + ROVA + TAT_ROVA)
+    def make_key(row):
+        r = row.get("ROVA"); t = row.get("TAT_ROVA")
+        return (safe_float(row["SEMEL_YISHUV"]),
+                safe_float(r) if pd.notna(r) else None,
+                safe_float(t) if pd.notna(t) else None)
 
-    level = row.get("geo_level", "city")
-    rova  = row.get("ROVA")
-    tat   = row.get("TAT_ROVA")
+    lookup08 = {}
+    for _, row in combined_08.iterrows():
+        k = make_key(row)
+        lookup08[k] = row
 
-    # Area qualifier (English, numeric) shown below city name in tooltip
-    if level == "sub_neighbourhood" and pd.notna(rova) and pd.notna(tat):
-        area = f"Sub-neighbourhood {int(rova)}/{int(tat)}"
-    elif level == "district" and pd.notna(tat):
-        area = f"Neighbourhood {int(tat)}"
-    else:
-        area = None
+    print("Building GeoJSON …")
+    features = []
+    for _, row in geo22.iterrows():
+        geom = row["geometry"]
+        if geom is None or geom.is_empty:
+            continue
 
-    props = {
-        "city":  city,
-        "area":  area,
-        "level": level,
-        "n":     safe_float(row.get("w_tot")),
-    }
-    for m in range(1, 14):
-        props[f"p{m}"] = safe_float(row.get(f"pct_{m}"))
+        city_en = str(row.get("SHEM_YISHUV_ENGLISH") or "").strip()
+        city_he = str(row.get("SHEM_YISHUV") or "").strip()
+        city    = city_en if city_en else city_he
 
-    features.append({
-        "type": "Feature",
-        "properties": props,
-        "geometry": mapping(geom),
-    })
+        level = row.get("geo_level", "city")
+        rova  = row.get("ROVA"); tat = row.get("TAT_ROVA")
+        if level == "sub_neighbourhood" and pd.notna(rova) and pd.notna(tat):
+            area = f"Sub-neighbourhood {int(rova)}/{int(tat)}"
+        elif level == "neighbourhood" and pd.notna(tat):
+            area = f"Neighbourhood {int(tat)}"
+        else:
+            area = None
 
-geojson_str = json.dumps(
-    {"type": "FeatureCollection", "features": features},
-    ensure_ascii=False,
-)
-print(f"  GeoJSON: {len(features)} features, ~{len(geojson_str)//1024} KB")
+        props = {"city": city, "area": area, "level": level}
+
+        # 2022 stats
+        props["n22"] = safe_float(row.get("w_tot"))
+        for s in SLUGS:
+            props[f"p22_{s}"] = safe_float(row.get(f"pct_{s}"))
+
+        # 2008 stats — look up by composite key
+        k = make_key(row)
+        row08 = lookup08.get(k)
+        props["n08"] = safe_float(row08["w_tot"]) if row08 is not None else None
+        for s in SLUGS:
+            props[f"p08_{s}"] = safe_float(row08[f"pct_{s}"]) if row08 is not None else None
+
+        features.append({"type": "Feature", "properties": props, "geometry": mapping(geom)})
+
+    geojson_str = json.dumps({"type": "FeatureCollection", "features": features},
+                             ensure_ascii=False)
+    print(f"  {len(features)} features, ~{len(geojson_str)//1024} KB")
+    return geojson_str
 
 
-# ── 6. Colour caps (95th percentile per mode) ──────────────────────────────────
-caps = {}
-for m in range(1, 14):
-    vals = combined[f"pct_{m}"].dropna()
-    caps[m] = float(round(vals.quantile(0.95), 2)) if len(vals) else 1.0
+# ── 5. Compute per-year colour caps ──────────────────────────────────────────
+def compute_caps(combined, year_tag):
+    caps = {}
+    for s in SLUGS:
+        vals = combined[f"pct_{s}"].dropna()
+        caps[s] = float(round(vals.quantile(0.95), 2)) if len(vals) else 1.0
+    return caps
 
-caps_js  = json.dumps({str(k): v for k, v in caps.items()})
-modes_js = json.dumps({str(k): v for k, v in TRANSPORT_MODES.items()}, ensure_ascii=False)
+
+# ── MAIN ──────────────────────────────────────────────────────────────────────
+stats_08 = load_year_stats(2008)
+stats_22 = load_year_stats(2022)
+
+crs, diss_large, diss_medium, diss_small = load_shapes()
+
+print("\nMerging 2008 …")
+combined_08 = merge_year(diss_large, diss_medium, diss_small, stats_08, 2008)
+print("Merging 2022 …")
+combined_22 = merge_year(diss_large, diss_medium, diss_small, stats_22, 2022)
+
+geojson_str = build_geojson(combined_08, combined_22, crs)
+
+caps_08 = compute_caps(combined_08, "08")
+caps_22 = compute_caps(combined_22, "22")
+
+caps_js  = json.dumps({"2008": caps_08, "2022": caps_22})
+modes_js = json.dumps([{"slug": m["slug"], "label": m["label"],
+                         "has2008": m[2008] is not None} for m in MODES],
+                      ensure_ascii=False)
 
 
-# ── 7. Write HTML ──────────────────────────────────────────────────────────────
-print("Writing HTML…")
-
+# ── 6. Write HTML ─────────────────────────────────────────────────────────────
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -246,9 +283,16 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
   display: flex; flex-direction: column;
   border-left: 1px solid #374151; overflow: hidden;
 }
-#panel-header { padding: 14px 14px 10px; border-bottom: 1px solid #374151; }
+#panel-header { padding: 12px 14px 10px; border-bottom: 1px solid #374151; }
 #panel-header h1 { font-size: 13px; font-weight: 700; color: #f9fafb; line-height: 1.5; }
-#panel-header p  { font-size: 10px; color: #6b7280; margin-top: 3px; }
+#year-toggle { display: flex; gap: 6px; margin-top: 8px; }
+.yr-btn {
+  flex: 1; padding: 5px 0; border-radius: 4px; border: 1px solid #374151;
+  background: #111827; color: #9ca3af; cursor: pointer; font-size: 13px;
+  font-weight: 600; transition: all 0.12s;
+}
+.yr-btn:hover { background: #374151; color: #f3f4f6; }
+.yr-btn.active { background: #0369a1; border-color: #0284c7; color: #fff; }
 #mode-list { flex: 1; overflow-y: auto; padding: 8px; }
 #mode-list::-webkit-scrollbar { width: 5px; }
 #mode-list::-webkit-scrollbar-track { background: #111827; }
@@ -260,17 +304,13 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
   background: transparent; color: #9ca3af;
   cursor: pointer; font-size: 12px; transition: all 0.12s;
 }
-.mode-btn:hover { background: #374151; color: #f3f4f6; border-color: #4b5563; }
-.mode-btn.active {
-  background: #1d4ed8; border-color: #2563eb;
-  color: #fff; font-weight: 600;
-}
+.mode-btn:hover:not(:disabled) { background: #374151; color: #f3f4f6; border-color: #4b5563; }
+.mode-btn.active { background: #1d4ed8; border-color: #2563eb; color: #fff; font-weight: 600; }
+.mode-btn:disabled { color: #374151; cursor: default; }
 #panel-footer { padding: 10px 14px; border-top: 1px solid #374151; }
 #legend-title { font-size: 10px; color: #6b7280; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
-#legend-bar {
-  height: 10px; border-radius: 3px; margin: 4px 0;
-  background: linear-gradient(to right, #ffffcc, #a1dab4, #41b6c4, #2c7fb8, #253494);
-}
+#legend-bar { height: 10px; border-radius: 3px; margin: 4px 0;
+  background: linear-gradient(to right, #ffffcc, #a1dab4, #41b6c4, #2c7fb8, #253494); }
 .legend-ticks { display: flex; justify-content: space-between; font-size: 10px; color: #6b7280; }
 #geo-note { margin-top: 8px; font-size: 10px; color: #4b5563; line-height: 1.5; }
 .leaflet-tooltip {
@@ -282,13 +322,15 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
 </style>
 </head>
 <body>
-
 <div id="map"></div>
-
 <div id="panel">
   <div id="panel-header">
-    <h1>Transport Mode by Area<br><span style="font-weight:400;color:#6b7280">Israel Census 2022</span></h1>
-    <p>Share of commuters (%) by area</p>
+    <h1>Transport Mode by Area<br>
+      <span style="font-weight:400;color:#6b7280">Israel Census</span></h1>
+    <div id="year-toggle">
+      <button class="yr-btn" data-year="2008">2008</button>
+      <button class="yr-btn active" data-year="2022">2022</button>
+    </div>
   </div>
   <div id="mode-list"></div>
   <div id="panel-footer">
@@ -299,7 +341,8 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
       Large cities: sub-neighbourhood level<br>
       Medium cities: neighbourhood level<br>
       Small settlements: city level<br>
-      Grey = no data
+      Grey = no data<br>
+      <span style="color:#374151">2022 boundaries used for both years</span>
     </div>
   </div>
 </div>
@@ -309,7 +352,8 @@ var CAPS  = __CAPS__;
 var MODES = __MODES__;
 var DATA  = __DATA__;
 
-var currentMode = 10;
+var currentYear = "2022";
+var currentSlug = "bicycle";
 
 var map = L.map('map', { preferCanvas: true }).setView([31.5, 34.9], 8);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
@@ -317,9 +361,7 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
   subdomains: 'abcd', maxZoom: 19
 }).addTo(map);
 
-// 5-stop sequential colour ramp (YlGnBu)
-var RAMP = ['#ffffcc', '#a1dab4', '#41b6c4', '#2c7fb8', '#253494'];
-
+var RAMP = ['#ffffcc','#a1dab4','#41b6c4','#2c7fb8','#253494'];
 function hexToRgb(h) {
   return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
 }
@@ -329,21 +371,24 @@ function getColor(pct, cap) {
   var n = RAMP.length - 1;
   var i = Math.min(Math.floor(t * n), n - 1);
   var f = t * n - i;
-  var a = hexToRgb(RAMP[i]), b = hexToRgb(RAMP[i + 1]);
-  return 'rgb(' +
-    Math.round(a[0] + (b[0]-a[0])*f) + ',' +
-    Math.round(a[1] + (b[1]-a[1])*f) + ',' +
-    Math.round(a[2] + (b[2]-a[2])*f) + ')';
+  var a = hexToRgb(RAMP[i]), b = hexToRgb(RAMP[i+1]);
+  return 'rgb('+Math.round(a[0]+(b[0]-a[0])*f)+','+Math.round(a[1]+(b[1]-a[1])*f)+','+Math.round(a[2]+(b[2]-a[2])*f)+')';
+}
+
+function propKey() { return 'p' + currentYear.slice(2) + '_' + currentSlug; }
+function nKey()    { return 'n' + currentYear.slice(2); }
+
+function getCap() {
+  var c = (CAPS[currentYear] || {})[currentSlug];
+  return (c != null && c > 0) ? c : 1;
 }
 
 function styleFn(feature) {
-  var p   = feature.properties['p' + currentMode];
-  var cap = CAPS[String(currentMode)];
+  var p   = feature.properties[propKey()];
+  var cap = getCap();
   return {
     fillColor:   getColor(p, cap),
-    weight:      0.4,
-    color:       '#555',
-    opacity:     0.8,
+    weight:      0.4, color: '#555', opacity: 0.8,
     fillOpacity: (p == null) ? 0.2 : 0.72,
   };
 }
@@ -355,15 +400,17 @@ var geojsonLayer = L.geoJSON(DATA, {
     layer.on({
       mouseover: function(e) {
         e.target.setStyle({ weight: 2, color: '#fff', fillOpacity: 0.92 });
-        var pct    = p['p' + currentMode];
+        var pct    = p[propKey()];
         var pctStr = (pct != null) ? pct.toFixed(2) + '%' : 'No data';
-        var nStr   = (p.n != null) ? Math.round(p.n).toLocaleString() : '—';
+        var n      = p[nKey()];
+        var nStr   = (n != null) ? Math.round(n).toLocaleString() : '—';
+        var mLabel = MODES.find(function(m){ return m.slug === currentSlug; }).label;
         layer.bindTooltip(
           '<div style="min-width:180px;line-height:1.7">' +
           '<b style="font-size:13px">' + (p.city || '—') + '</b>' +
           (p.area ? '<br><span style="font-size:11px;color:#9ca3af">' + p.area + '</span>' : '') +
           '<hr style="border:none;border-top:1px solid #374151;margin:5px 0">' +
-          MODES[String(currentMode)] + ':<br>' +
+          mLabel + ' (' + currentYear + '):<br>' +
           '<b style="font-size:14px">' + pctStr + '</b><br>' +
           '<span style="font-size:10px;color:#9ca3af">Weighted commuters: ' + nStr + '</span>' +
           '</div>',
@@ -380,42 +427,58 @@ var geojsonLayer = L.geoJSON(DATA, {
 
 function updateMap() {
   geojsonLayer.setStyle(styleFn);
-  var cap = CAPS[String(currentMode)];
+  var cap = getCap();
   document.getElementById('leg-cap').textContent = cap.toFixed(1) + '%';
   document.querySelectorAll('.mode-btn').forEach(function(b) {
-    b.classList.toggle('active', +b.dataset.mode === currentMode);
+    b.classList.toggle('active', b.dataset.slug === currentSlug);
+  });
+  document.querySelectorAll('.yr-btn').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.year === currentYear);
+  });
+  // Disable modes not available in 2008
+  document.querySelectorAll('.mode-btn').forEach(function(b) {
+    var mode = MODES.find(function(m){ return m.slug === b.dataset.slug; });
+    b.disabled = (currentYear === '2008' && !mode.has2008);
+    if (b.disabled && b.dataset.slug === currentSlug) {
+      currentSlug = 'bicycle';  // fallback
+      updateMap();
+    }
   });
 }
 
-// Build mode buttons
+// Year buttons
+document.querySelectorAll('.yr-btn').forEach(function(b) {
+  b.onclick = function() { currentYear = b.dataset.year; updateMap(); };
+});
+
+// Mode buttons
 var list = document.getElementById('mode-list');
-Object.keys(MODES).map(Number).sort(function(a,b){return a-b;}).forEach(function(m) {
+MODES.forEach(function(m, i) {
   var btn = document.createElement('button');
-  btn.className = 'mode-btn' + (m === currentMode ? ' active' : '');
-  btn.dataset.mode = m;
-  btn.textContent = m + '. ' + MODES[m];
-  btn.onclick = function() { currentMode = m; updateMap(); };
+  btn.className = 'mode-btn' + (m.slug === currentSlug ? ' active' : '');
+  btn.dataset.slug = m.slug;
+  btn.textContent = (i + 1) + '. ' + m.label;
+  btn.onclick = function() {
+    if (!btn.disabled) { currentSlug = m.slug; updateMap(); }
+  };
   list.appendChild(btn);
 });
 
-// Initialise legend cap
-document.getElementById('leg-cap').textContent = CAPS[String(currentMode)].toFixed(1) + '%';
+document.getElementById('leg-cap').textContent = getCap().toFixed(1) + '%';
 </script>
 </body>
 </html>
 """
 
-html_out = (
-    HTML
+html_out = (HTML
     .replace("__CAPS__",  caps_js)
     .replace("__MODES__", modes_js)
-    .replace("__DATA__",  geojson_str)
-)
+    .replace("__DATA__",  geojson_str))
 
 out_path = "transport_mode_israel.html"
 with open(out_path, "w", encoding="utf-8") as f:
     f.write(html_out)
 
 size_mb = len(html_out) / 1_048_576
-print(f"Saved → {out_path}  ({size_mb:.1f} MB)")
+print(f"\nSaved → {out_path}  ({size_mb:.1f} MB)")
 print("Done ✓")
