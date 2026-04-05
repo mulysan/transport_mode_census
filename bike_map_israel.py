@@ -1207,7 +1207,7 @@ document.querySelectorAll(".lvl-btn").forEach(function(b) {
     document.getElementById("level-note-sub") .style.display = aggLevel === "sub"  ? "" : "none";
     document.getElementById("level-note-rova").style.display = aggLevel === "rova" ? "" : "none";
     document.getElementById("level-note-city").style.display = aggLevel === "city" ? "" : "none";
-    updateAll(false);
+    updateAll(true);
   };
 });
 
