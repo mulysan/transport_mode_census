@@ -177,10 +177,10 @@ def merge_stats_on_shapes(diss_large, diss_medium, diss_small, stats, crs_large,
 
     large_gdf  = _merge(diss_large,  ["SEMEL_YISHUV","ROVA","TAT_ROVA"],
                          stats["large"],  [SETT_COL, ROVA_COL, AREA_COL],
-                         "sub_neighbourhood", crs_large)
+                         "sub_borough", crs_large)
     medium_gdf = _merge(diss_medium, ["SEMEL_YISHUV","TAT_ROVA"],
                          stats["medium"], [SETT_COL, AREA_COL],
-                         "neighbourhood", crs_med_small)
+                         "borough", crs_med_small)
     small_gdf  = _merge(diss_small,  ["SEMEL_YISHUV"],
                          stats["small"],  [SETT_COL],
                          "city", crs_med_small)
@@ -281,10 +281,10 @@ def gdf_to_features(gdf, year_tag, city_names=None, extra_cols=None):
 
         level = row.get("geo_level", "city")
         rova  = row.get("ROVA"); tat = row.get("TAT_ROVA")
-        if level == "sub_neighbourhood" and pd.notna(rova) and pd.notna(tat):
-            area = f"Sub-neighbourhood {int(rova)}/{int(tat)}"
-        elif level == "neighbourhood" and pd.notna(tat):
-            area = f"Neighbourhood {int(tat)}"
+        if level == "sub_borough" and pd.notna(rova) and pd.notna(tat):
+            area = f"Sub-borough {int(rova)}/{int(tat)}"
+        elif level == "borough" and pd.notna(tat):
+            area = f"Borough {int(tat)}"
         else:
             area = None
 
@@ -467,7 +467,7 @@ g08_large = g08_large.merge(
     left_on=["SEMEL_YISHUV","ROVA","TAT_ROVA"],
     right_on=[SETT_COL, ROVA_COL, AREA_COL], how="left"
 )
-g08_large["geo_level"] = "sub_neighbourhood"
+g08_large["geo_level"] = "sub_borough"
 g08_large = gpd.GeoDataFrame(g08_large, crs=METRIC_CRS)
 
 # Medium/small: use 2022 GDB geometry with 2008 stats
@@ -630,10 +630,10 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
 }
 .leaflet-tooltip::before { display: none !important; }
 .city-label {
-  font-size: 10px; font-family: 'Segoe UI', Arial, sans-serif;
-  font-weight: 700; color: #111827; white-space: nowrap;
+  font-size: 9px; font-family: 'Segoe UI', Arial, sans-serif;
+  font-weight: 400; color: #6b7280; white-space: nowrap;
   pointer-events: none; background: transparent; border: none; box-shadow: none;
-  text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff;
+  text-shadow: 0 0 2px rgba(255,255,255,0.8);
   text-align: center; line-height: 1.2;
 }
 </style>
@@ -646,8 +646,8 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
       <span style="font-weight:400;color:#6b7280">Israel Census</span></h1>
     <div id="view-toggle"></div>
     <div id="level-toggle">
-      <button class="lvl-btn active" data-lvl="sub">Sub-area</button>
-      <button class="lvl-btn" data-lvl="rova">ROVA</button>
+      <button class="lvl-btn active" data-lvl="sub">Sub-borough</button>
+      <button class="lvl-btn" data-lvl="rova">Borough</button>
       <button class="lvl-btn" data-lvl="city">City</button>
     </div>
     <div id="change-selectors">
@@ -667,8 +667,8 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
       <span id="leg-high">-</span>
     </div>
     <div id="geo-note">
-      <span id="level-note-sub">Large: sub-neighbourhood | Med: neighbourhood | Small: city</span>
-      <span id="level-note-rova" style="display:none">Large: ROVA | Med: neighbourhood | Small: city</span>
+      <span id="level-note-sub">Large: sub-borough | Med: borough | Small: city</span>
+      <span id="level-note-rova" style="display:none">Large: borough | Med: borough | Small: city</span>
       <span id="level-note-city" style="display:none">All settlements at city level</span>
       <br>Grey = no data
       <br><span id="change-note" style="display:none;color:#7c3aed">
@@ -680,8 +680,8 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
       <div style="font-size:10px;color:#6b7280;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Export CSV</div>
       <div style="display:flex;gap:4px;flex-wrap:wrap">
         <button onclick="downloadCSV('city')"  style="flex:1;padding:4px;font-size:10px;background:#1f2937;border:1px solid #374151;color:#9ca3af;border-radius:3px;cursor:pointer">City</button>
-        <button onclick="downloadCSV('rova')"  style="flex:1;padding:4px;font-size:10px;background:#1f2937;border:1px solid #374151;color:#9ca3af;border-radius:3px;cursor:pointer">ROVA</button>
-        <button onclick="downloadCSV('sub')"   style="flex:1;padding:4px;font-size:10px;background:#1f2937;border:1px solid #374151;color:#9ca3af;border-radius:3px;cursor:pointer">Sub-area</button>
+        <button onclick="downloadCSV('rova')"  style="flex:1;padding:4px;font-size:10px;background:#1f2937;border:1px solid #374151;color:#9ca3af;border-radius:3px;cursor:pointer">Borough</button>
+        <button onclick="downloadCSV('sub')"   style="flex:1;padding:4px;font-size:10px;background:#1f2937;border:1px solid #374151;color:#9ca3af;border-radius:3px;cursor:pointer">Sub-borough</button>
       </div>
       <div style="font-size:9px;color:#4b5563;margin-top:3px">Exports current year's data</div>
     </div>
@@ -724,8 +724,8 @@ function rampColor(ramp, t) {
   return 'rgb('+Math.round(a[0]+(b[0]-a[0])*f)+','+Math.round(a[1]+(b[1]-a[1])*f)+','+Math.round(a[2]+(b[2]-a[2])*f)+')';
 }
 var RAMP_SEQ = ['#0000b4','#00a8f0','#00d890','#80ff00','#ffff00','#ff8800','#ff0000'];
-// Diverging: decrease (left) = red/orange, zero = white/yellow, increase (right) = green/blue
-var RAMP_DIV = ['#ff0000','#ff8800','#ffff00','#ffffff','#80ff00','#00a8f0','#0000b4'];
+// Diverging: decrease (left) = blue/cyan, zero = white/yellow, increase (right) = orange/red
+var RAMP_DIV = ['#0000b4','#00a8f0','#80ff00','#ffffff','#ffff00','#ff8800','#ff0000'];
 
 function getColorSingle(pct, cap) {
   if (pct == null) return '#6b7280';
@@ -846,7 +846,7 @@ function makeOnEach(feature, layer) {
       // Aggregate-level label under city name
       var areaLabel = p.area;
       if (aggLevel === "city") areaLabel = "City level";
-      else if (aggLevel === "rova" && p.rova_code != null) areaLabel = "ROVA " + p.rova_code;
+      else if (aggLevel === "rova" && p.rova_code != null) areaLabel = "Borough " + p.rova_code;
 
       if (viewMode === "single") {
         valStr    = (val != null) ? val.toFixed(2) + "%" : "No data";
@@ -1093,7 +1093,7 @@ function buildLabels() {
 
 function syncLabels() {
   var z = map.getZoom();
-  if (z >= 10) {
+  if (z >= 13) {
     buildLabels();
     if (!map.hasLayer(labelLayer)) labelLayer.addTo(map);
   } else {
