@@ -683,8 +683,111 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
         <button onclick="downloadCSV('rova')"  style="flex:1;padding:4px;font-size:10px;background:#1f2937;border:1px solid #374151;color:#9ca3af;border-radius:3px;cursor:pointer">Borough</button>
         <button onclick="downloadCSV('sub')"   style="flex:1;padding:4px;font-size:10px;background:#1f2937;border:1px solid #374151;color:#9ca3af;border-radius:3px;cursor:pointer">Sub-borough</button>
       </div>
-      <div style="font-size:9px;color:#4b5563;margin-top:3px">Exports current year's data</div>
+      <div style="font-size:9px;color:#4b5563;margin-top:3px">In change mode, exports pp differences</div>
     </div>
+    <div style="margin-top:10px;border-top:1px solid #374151;padding-top:8px">
+      <button onclick="document.getElementById('methodology-modal').style.display='flex'"
+        style="width:100%;padding:5px;font-size:10px;background:#111827;border:1px solid #374151;color:#6b7280;border-radius:3px;cursor:pointer;text-align:center">
+        Methodology &amp; data sources
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Methodology modal -->
+<div id="methodology-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;max-width:640px;width:100%;max-height:85vh;overflow-y:auto;padding:24px;color:#d1d5db;font-size:13px;line-height:1.7">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2 style="font-size:15px;font-weight:700;color:#f9fafb">Methodology &amp; Data Sources</h2>
+      <button onclick="document.getElementById('methodology-modal').style.display='none'"
+        style="background:none;border:none;color:#6b7280;font-size:20px;cursor:pointer;line-height:1">&times;</button>
+    </div>
+
+    <h3 style="font-size:12px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px">Data sources</h3>
+    <p>Transport shares are derived from two Israel Central Bureau of Statistics (CBS) census public-use files (PUFs):</p>
+    <table style="width:100%;border-collapse:collapse;margin:8px 0 14px">
+      <tr style="border-bottom:1px solid #374151">
+        <th style="text-align:left;padding:4px 8px 4px 0;color:#9ca3af;font-weight:600">Census</th>
+        <th style="text-align:left;padding:4px 8px;color:#9ca3af;font-weight:600">File</th>
+        <th style="text-align:left;padding:4px 0;color:#9ca3af;font-weight:600">Commuters</th>
+      </tr>
+      <tr style="border-bottom:1px solid #374151">
+        <td style="padding:4px 8px 4px 0">2008</td>
+        <td style="padding:4px 8px;font-family:monospace;font-size:11px">census2008bike.csv</td>
+        <td style="padding:4px 0">~385 k</td>
+      </tr>
+      <tr>
+        <td style="padding:4px 8px 4px 0">2022</td>
+        <td style="padding:4px 8px;font-family:monospace;font-size:11px">census2022bike.csv</td>
+        <td style="padding:4px 0">~761 k</td>
+      </tr>
+    </table>
+    <p style="margin-bottom:14px">Only persons who reported a workplace commute mode are included (codes 98/99 excluded from 2008). Each person is weighted by their CBS sampling weight (<em>mishkal</em>). The transport share for an area is the weighted percentage of commuters using each mode.</p>
+
+    <h3 style="font-size:12px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px">Geographic levels</h3>
+    <p style="margin-bottom:6px">The CBS geography has three tiers, mapped to the terminology used here:</p>
+    <table style="width:100%;border-collapse:collapse;margin:8px 0 14px">
+      <tr style="border-bottom:1px solid #374151">
+        <th style="text-align:left;padding:4px 8px 4px 0;color:#9ca3af;font-weight:600">Display name</th>
+        <th style="text-align:left;padding:4px 8px;color:#9ca3af;font-weight:600">CBS code</th>
+        <th style="text-align:left;padding:4px 0;color:#9ca3af;font-weight:600">Coverage</th>
+      </tr>
+      <tr style="border-bottom:1px solid #374151">
+        <td style="padding:4px 8px 4px 0">Sub-borough</td>
+        <td style="padding:4px 8px;font-family:monospace;font-size:11px">ROVA / TAT_ROVA</td>
+        <td style="padding:4px 0">19 large cities (Jerusalem, Tel Aviv, Haifa&hellip;)</td>
+      </tr>
+      <tr style="border-bottom:1px solid #374151">
+        <td style="padding:4px 8px 4px 0">Borough</td>
+        <td style="padding:4px 8px;font-family:monospace;font-size:11px">TAT_ROVA</td>
+        <td style="padding:4px 0">~35 medium cities (Netivot, Dimona, Eilat&hellip;)</td>
+      </tr>
+      <tr>
+        <td style="padding:4px 8px 4px 0">City</td>
+        <td style="padding:4px 8px;font-family:monospace;font-size:11px">SEMEL_YISHUV</td>
+        <td style="padding:4px 0">All other settlements</td>
+      </tr>
+    </table>
+    <p style="margin-bottom:14px">The <strong>aggregation toggle</strong> (Sub-borough / Borough / City) re-aggregates on the fly using CBS sampling weights, without re-fetching any data.</p>
+
+    <h3 style="font-size:12px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px">Geometry strategy</h3>
+    <p style="margin-bottom:6px"><strong>2022 single-year view:</strong> uses the CBS 2022 statistical areas geodatabase (EPSG:2039).</p>
+    <p style="margin-bottom:6px"><strong>2008 single-year view:</strong> uses a dedicated 2008 sub-area shapefile (325 polygons, large cities only). Medium and small cities use 2022 boundaries with 2008 census values.</p>
+    <p style="margin-bottom:14px"><strong>Change view (2008→2022):</strong> always uses 2008 boundaries. For each 2008 polygon the 2022 share is derived by area-weighted spatial overlay against all overlapping 2022 polygons within the same settlement (325/325 polygons matched).</p>
+
+    <h3 style="font-size:12px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px">Grey areas</h3>
+    <p style="margin-bottom:14px">Grey polygons have no match in the census PUF. In the 2008 view this affects East Jerusalem Arab neighbourhoods (excluded from the 2008 census) and a small number of outer sub-areas not present in the file. These absences are genuine data gaps, not a display error.</p>
+
+    <h3 style="font-size:12px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px">Colour scales</h3>
+    <p style="margin-bottom:6px"><strong>Single year:</strong> blue → cyan → green → yellow → orange → red, capped at the 95th percentile of values across all areas for the selected mode and year.</p>
+    <p style="margin-bottom:14px"><strong>Change view:</strong> diverging scale centred at zero — blue = decrease, red = increase — capped at the 95th percentile of absolute changes.</p>
+
+    <h3 style="font-size:12px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px">Transport mode codes</h3>
+    <table style="width:100%;border-collapse:collapse;margin:8px 0">
+      <tr style="border-bottom:1px solid #374151">
+        <th style="text-align:left;padding:4px 8px 4px 0;color:#9ca3af;font-weight:600">Mode</th>
+        <th style="text-align:center;padding:4px 8px;color:#9ca3af;font-weight:600">2008 code</th>
+        <th style="text-align:center;padding:4px 0;color:#9ca3af;font-weight:600">2022 code</th>
+      </tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Private car – driver</td><td style="text-align:center;padding:3px 8px">1</td><td style="text-align:center">1</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Private car – passenger</td><td style="text-align:center;padding:3px 8px">2</td><td style="text-align:center">2</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Public bus</td><td style="text-align:center;padding:3px 8px">3</td><td style="text-align:center">3</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Light rail / metro</td><td style="text-align:center;padding:3px 8px;color:#6b7280">—</td><td style="text-align:center">4</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Employer transport</td><td style="text-align:center;padding:3px 8px">4</td><td style="text-align:center">5</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Israel Railways</td><td style="text-align:center;padding:3px 8px">5</td><td style="text-align:center">6</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Service taxi</td><td style="text-align:center;padding:3px 8px">6</td><td style="text-align:center">7</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Special taxi</td><td style="text-align:center;padding:3px 8px">7</td><td style="text-align:center">8</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Motorcycle / moped</td><td style="text-align:center;padding:3px 8px">8</td><td style="text-align:center">9</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Bicycle</td><td style="text-align:center;padding:3px 8px">9</td><td style="text-align:center">10</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Walking</td><td style="text-align:center;padding:3px 8px">10</td><td style="text-align:center">11</td></tr>
+      <tr style="border-bottom:1px solid #374151"><td style="padding:3px 8px 3px 0">Truck</td><td style="text-align:center;padding:3px 8px">11</td><td style="text-align:center">12</td></tr>
+      <tr><td style="padding:3px 8px 3px 0">Other vehicle</td><td style="text-align:center;padding:3px 8px">12</td><td style="text-align:center">13</td></tr>
+    </table>
+
+    <p style="margin-top:16px;font-size:11px;color:#4b5563">
+      Map built with <a href="https://leafletjs.com" style="color:#6b7280">Leaflet.js</a> and CartoDB basemap.
+      All data &copy; Israel Central Bureau of Statistics.
+    </p>
   </div>
 </div>
 <script>
@@ -1163,6 +1266,11 @@ syncLabels();
 
 rebuildLayer();
 updateAll(false);
+
+// Close methodology modal on backdrop click
+document.getElementById("methodology-modal").addEventListener("click", function(e) {
+  if (e.target === this) this.style.display = "none";
+});
 </script>
 </body>
 </html>
