@@ -1,12 +1,6 @@
 """
-All-Israel interactive transport mode map – 2008 and 2022 census
-Based on Israel CBS Census public-use files
-
-Geometry: 2022 statistical areas (ezorim_statistiim_2022 GDB) used for both years.
-          ~85% of 2008 large-city sub-areas match 2022 boundaries; the rest show grey.
-
-Transport modes are aligned across years by name; code numbers differ between censuses.
-2008 codes 98 (children 0-14) and 99 (unknown) are excluded as non-commuters.
+All-Israel interactive transport mode map – multi-year census
+Supports single-year view and change-between-years view.
 """
 
 import json
@@ -30,7 +24,7 @@ YEAR_CFG = {
         "file":          "census/census2008bike.csv",
         "transport_col": "emtzaehagaaikarimakomavdmchvpuf",
         "weight_col":    "mishkalpuf",
-        "exclude_codes": {98, 99},   # children / unknown
+        "exclude_codes": {98, 99},
     },
     2022: {
         "file":          "census/census2022bike.csv",
@@ -39,24 +33,23 @@ YEAR_CFG = {
         "exclude_codes": set(),
     },
 }
+YEARS = sorted(YEAR_CFG.keys())
 
-# ── Aligned transport modes (codes differ by year) ────────────────────────────
-# slug: short key used in GeoJSON properties  (e.g. "bicycle" → p08_bicycle)
-# 2008/2022: transport code for that year, or None if mode didn't exist
+# ── Aligned transport modes ───────────────────────────────────────────────────
 MODES = [
-    {"slug": "car_driver",  "label": "Private car – driver",     2008: 1,    2022: 1 },
-    {"slug": "car_pass",    "label": "Private car – passenger",   2008: 2,    2022: 2 },
-    {"slug": "bus",         "label": "Public bus",                2008: 3,    2022: 3 },
-    {"slug": "light_rail",  "label": "Light rail / metro",        2008: None, 2022: 4 },
-    {"slug": "employer",    "label": "Employer transport",         2008: 4,    2022: 5 },
-    {"slug": "train",       "label": "Israel Railways",            2008: 5,    2022: 6 },
-    {"slug": "taxi_svc",    "label": "Service taxi",               2008: 6,    2022: 7 },
-    {"slug": "taxi_sp",     "label": "Special taxi",               2008: 7,    2022: 8 },
-    {"slug": "moto",        "label": "Motorcycle / moped",         2008: 8,    2022: 9 },
-    {"slug": "bicycle",     "label": "Bicycle",                   2008: 9,    2022: 10},
-    {"slug": "walking",     "label": "Walking",                   2008: 10,   2022: 11},
-    {"slug": "truck",       "label": "Truck",                     2008: 11,   2022: 12},
-    {"slug": "other",       "label": "Other vehicle",             2008: 12,   2022: 13},
+    {"slug": "car_driver",  "label": "Private car - driver",     2008: 1,    2022: 1 },
+    {"slug": "car_pass",    "label": "Private car - passenger",  2008: 2,    2022: 2 },
+    {"slug": "bus",         "label": "Public bus",               2008: 3,    2022: 3 },
+    {"slug": "light_rail",  "label": "Light rail / metro",       2008: None, 2022: 4 },
+    {"slug": "employer",    "label": "Employer transport",        2008: 4,    2022: 5 },
+    {"slug": "train",       "label": "Israel Railways",           2008: 5,    2022: 6 },
+    {"slug": "taxi_svc",    "label": "Service taxi",              2008: 6,    2022: 7 },
+    {"slug": "taxi_sp",     "label": "Special taxi",              2008: 7,    2022: 8 },
+    {"slug": "moto",        "label": "Motorcycle / moped",        2008: 8,    2022: 9 },
+    {"slug": "bicycle",     "label": "Bicycle",                  2008: 9,    2022: 10},
+    {"slug": "walking",     "label": "Walking",                  2008: 10,   2022: 11},
+    {"slug": "truck",       "label": "Truck",                    2008: 11,   2022: 12},
+    {"slug": "other",       "label": "Other vehicle",            2008: 12,   2022: 13},
 ]
 SLUGS = [m["slug"] for m in MODES]
 
@@ -64,20 +57,18 @@ SLUGS = [m["slug"] for m in MODES]
 # ── 1. Compute mode shares for one year ───────────────────────────────────────
 def load_year_stats(year):
     cfg = YEAR_CFG[year]
-    print(f"\n[{year}] Loading {cfg['file']} …")
+    print(f"\n[{year}] Loading {cfg['file']} ...")
     df = pd.read_csv(cfg["file"])
     df.columns = df.columns.str.lower().str.strip()
 
     tc = cfg["transport_col"]
     wc = cfg["weight_col"]
 
-    # Commuters: non-null transport, excluding special non-commuter codes
     mask = df[tc].notna() & ~df[tc].isin(cfg["exclude_codes"])
     workers = df[mask].copy()
     print(f"  {len(workers):,} commuters")
 
     W = workers[wc]
-    # Weighted mode dummies per slug
     for m in MODES:
         code = m[year]
         workers[f"wm_{m['slug']}"] = ((workers[tc] == code) * W) if code else 0.0
@@ -106,12 +97,12 @@ def load_year_stats(year):
     return stats
 
 
-# ── 2. Load & dissolve shapefile (done once, used for both years) ─────────────
+# ── 2. Load & dissolve 2022 shapefile (geometry used for all views) ───────────
 def load_shapes():
     gdb = "ezorim_statistiim_2022.gdb"
     if not os.path.exists(gdb):
         os.symlink(str(pathlib.Path("ezorim_statistiim_2022").resolve()), gdb)
-    print("\nLoading shapefile …")
+    print("\nLoading shapefile ...")
     gdf = gpd.read_file(gdb)
 
     shp_large  = gdf[gdf["ROVA"].notna()].copy()
@@ -119,8 +110,8 @@ def load_shapes():
     shp_small  = gdf[gdf["TAT_ROVA"].isna()].copy()
 
     diss_large  = shp_large.dissolve( by=["SEMEL_YISHUV","ROVA","TAT_ROVA"], aggfunc="first").reset_index()
-    diss_medium = shp_medium.dissolve(by=["SEMEL_YISHUV","TAT_ROVA"],         aggfunc="first").reset_index()
-    diss_small  = shp_small.dissolve( by=["SEMEL_YISHUV"],                    aggfunc="first").reset_index()
+    diss_medium = shp_medium.dissolve(by=["SEMEL_YISHUV","TAT_ROVA"],        aggfunc="first").reset_index()
+    diss_small  = shp_small.dissolve( by=["SEMEL_YISHUV"],                   aggfunc="first").reset_index()
     print(f"  Dissolved: large={len(diss_large)}, medium={len(diss_medium)}, small={len(diss_small)}")
     return gdf.crs, diss_large, diss_medium, diss_small
 
@@ -167,7 +158,7 @@ def merge_year(diss_large, diss_medium, diss_small, stats, year):
     return combined
 
 
-# ── 4. Build GeoJSON with both years' data ────────────────────────────────────
+# ── 4. Build GeoJSON features (all years embedded per feature) ────────────────
 def safe_float(v):
     try:
         f = float(v)
@@ -175,26 +166,31 @@ def safe_float(v):
     except Exception:
         return None
 
-def build_geojson(combined_08, combined_22, crs):
-    # Reproject and simplify 2022 (canonical geometry)
-    geo22 = gpd.GeoDataFrame(combined_22, crs=crs).to_crs(epsg=4326)
-    geo22["geometry"] = geo22["geometry"].simplify(0.0003, preserve_topology=True)
+def build_features(combined_by_year, crs):
+    # Use the last year's combined as the canonical geometry base
+    canonical_year = YEARS[-1]
+    geo_base = gpd.GeoDataFrame(combined_by_year[canonical_year], crs=crs).to_crs(epsg=4326)
+    geo_base["geometry"] = geo_base["geometry"].simplify(0.0003, preserve_topology=True)
 
-    # Build per-area lookup for 2008 stats (match on SEMEL_YISHUV + ROVA + TAT_ROVA)
+    # Build lookups for each non-canonical year
     def make_key(row):
         r = row.get("ROVA"); t = row.get("TAT_ROVA")
         return (safe_float(row["SEMEL_YISHUV"]),
                 safe_float(r) if pd.notna(r) else None,
                 safe_float(t) if pd.notna(t) else None)
 
-    lookup08 = {}
-    for _, row in combined_08.iterrows():
-        k = make_key(row)
-        lookup08[k] = row
+    lookups = {}
+    for yr in YEARS:
+        if yr == canonical_year:
+            continue
+        lk = {}
+        for _, row in combined_by_year[yr].iterrows():
+            lk[make_key(row)] = row
+        lookups[yr] = lk
 
-    print("Building GeoJSON …")
+    print("Building GeoJSON ...")
     features = []
-    for _, row in geo22.iterrows():
+    for _, row in geo_base.iterrows():
         geom = row["geometry"]
         if geom is None or geom.is_empty:
             continue
@@ -214,58 +210,95 @@ def build_geojson(combined_08, combined_22, crs):
 
         props = {"city": city, "area": area, "level": level}
 
-        # 2022 stats
-        props["n22"] = safe_float(row.get("w_tot"))
+        # Canonical year stats
+        yy = str(canonical_year)[2:]
+        props[f"n{yy}"] = safe_float(row.get("w_tot"))
         for s in SLUGS:
-            props[f"p22_{s}"] = safe_float(row.get(f"pct_{s}"))
+            props[f"p{yy}_{s}"] = safe_float(row.get(f"pct_{s}"))
 
-        # 2008 stats — look up by composite key
+        # Other years via lookup
         k = make_key(row)
-        row08 = lookup08.get(k)
-        props["n08"] = safe_float(row08["w_tot"]) if row08 is not None else None
-        for s in SLUGS:
-            props[f"p08_{s}"] = safe_float(row08[f"pct_{s}"]) if row08 is not None else None
+        for yr in YEARS:
+            if yr == canonical_year:
+                continue
+            yy2 = str(yr)[2:]
+            row_yr = lookups[yr].get(k)
+            props[f"n{yy2}"] = safe_float(row_yr["w_tot"]) if row_yr is not None else None
+            for s in SLUGS:
+                props[f"p{yy2}_{s}"] = safe_float(row_yr[f"pct_{s}"]) if row_yr is not None else None
 
         features.append({"type": "Feature", "properties": props, "geometry": mapping(geom)})
 
-    geojson_str = json.dumps({"type": "FeatureCollection", "features": features},
-                             ensure_ascii=False)
-    print(f"  {len(features)} features, ~{len(geojson_str)//1024} KB")
-    return geojson_str
+    print(f"  {len(features)} features")
+    return features
 
 
-# ── 5. Compute per-year colour caps ──────────────────────────────────────────
-def compute_caps(combined, year_tag):
-    caps = {}
-    for s in SLUGS:
-        vals = combined[f"pct_{s}"].dropna()
-        caps[s] = float(round(vals.quantile(0.95), 2)) if len(vals) else 1.0
-    return caps
+# ── 5. Compute colour caps ────────────────────────────────────────────────────
+def compute_caps(combined_by_year):
+    single_caps = {}
+    for yr in YEARS:
+        combined = combined_by_year[yr]
+        caps = {}
+        for s in SLUGS:
+            vals = combined[f"pct_{s}"].dropna()
+            caps[s] = float(round(vals.quantile(0.95), 2)) if len(vals) else 1.0
+        single_caps[str(yr)] = caps
+
+    # Change caps: 95th percentile of |diff| for each ordered pair (min_yr, max_yr)
+    change_caps = {}
+    for i, y1 in enumerate(YEARS):
+        for y2 in YEARS[i+1:]:
+            c1 = combined_by_year[y1].copy()
+            c2 = combined_by_year[y2].copy()
+            # Merge on geo keys
+            key_cols = ["SEMEL_YISHUV","ROVA","TAT_ROVA"]
+            for df in (c1, c2):
+                for col in key_cols:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+            merged = c2.merge(c1, on=key_cols, suffixes=("_new","_old"), how="inner")
+            pair_key = f"{y1}_{y2}"
+            pair_caps = {}
+            for s in SLUGS:
+                col_new = f"pct_{s}_new"
+                col_old = f"pct_{s}_old"
+                if col_new in merged.columns and col_old in merged.columns:
+                    diffs = (merged[col_new] - merged[col_old]).dropna().abs()
+                    pair_caps[s] = float(round(diffs.quantile(0.95), 2)) if len(diffs) else 1.0
+                else:
+                    pair_caps[s] = 1.0
+            change_caps[pair_key] = pair_caps
+
+    return {"single": single_caps, "change": change_caps}
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
-stats_08 = load_year_stats(2008)
-stats_22 = load_year_stats(2022)
+all_stats = {yr: load_year_stats(yr) for yr in YEARS}
 
 crs, diss_large, diss_medium, diss_small = load_shapes()
 
-print("\nMerging 2008 …")
-combined_08 = merge_year(diss_large, diss_medium, diss_small, stats_08, 2008)
-print("Merging 2022 …")
-combined_22 = merge_year(diss_large, diss_medium, diss_small, stats_22, 2022)
+combined_by_year = {}
+for yr in YEARS:
+    print(f"\nMerging {yr} ...")
+    combined_by_year[yr] = merge_year(diss_large, diss_medium, diss_small, all_stats[yr], yr)
 
-geojson_str = build_geojson(combined_08, combined_22, crs)
+features   = build_features(combined_by_year, crs)
+caps_all   = compute_caps(combined_by_year)
 
-caps_08 = compute_caps(combined_08, "08")
-caps_22 = compute_caps(combined_22, "22")
+geojson_str = json.dumps({"type": "FeatureCollection", "features": features}, ensure_ascii=False)
+print(f"  GeoJSON ~{len(geojson_str)//1024} KB")
 
-caps_js  = json.dumps({"2008": caps_08, "2022": caps_22})
-modes_js = json.dumps([{"slug": m["slug"], "label": m["label"],
-                         "has2008": m[2008] is not None} for m in MODES],
-                      ensure_ascii=False)
+caps_js  = json.dumps(caps_all)
+years_js = json.dumps(YEARS)
+modes_js = json.dumps([
+    {"slug": m["slug"], "label": m["label"],
+     "years": [yr for yr in YEARS if m[yr] is not None]}
+    for m in MODES
+], ensure_ascii=False)
 
 
-# ── 6. Write HTML ─────────────────────────────────────────────────────────────
+
+# ── 6. HTML template ──────────────────────────────────────────────────────────
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -285,14 +318,26 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
 }
 #panel-header { padding: 12px 14px 10px; border-bottom: 1px solid #374151; }
 #panel-header h1 { font-size: 13px; font-weight: 700; color: #f9fafb; line-height: 1.5; }
-#year-toggle { display: flex; gap: 6px; margin-top: 8px; }
-.yr-btn {
-  flex: 1; padding: 5px 0; border-radius: 4px; border: 1px solid #374151;
-  background: #111827; color: #9ca3af; cursor: pointer; font-size: 13px;
-  font-weight: 600; transition: all 0.12s;
+#view-toggle { display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
+.view-btn {
+  flex: 1; padding: 5px 6px; border-radius: 4px; border: 1px solid #374151;
+  background: #111827; color: #9ca3af; cursor: pointer; font-size: 12px;
+  font-weight: 600; transition: all 0.12s; white-space: nowrap;
 }
-.yr-btn:hover { background: #374151; color: #f3f4f6; }
-.yr-btn.active { background: #0369a1; border-color: #0284c7; color: #fff; }
+.view-btn:hover { background: #374151; color: #f3f4f6; }
+.view-btn.active { background: #0369a1; border-color: #0284c7; color: #fff; }
+.view-btn.active-change { background: #7c3aed; border-color: #8b5cf6; color: #fff; }
+#change-selectors {
+  display: none; margin-top: 8px; padding: 8px 10px;
+  background: #111827; border-radius: 6px; border: 1px solid #374151;
+}
+#change-selectors.visible { display: block; }
+#change-selectors label { font-size: 11px; color: #6b7280; display: block; margin-bottom: 2px; }
+#change-selectors select {
+  width: 100%; padding: 4px 6px; border-radius: 4px;
+  border: 1px solid #374151; background: #1f2937; color: #d1d5db;
+  font-size: 12px; margin-bottom: 6px; cursor: pointer;
+}
 #mode-list { flex: 1; overflow-y: auto; padding: 8px; }
 #mode-list::-webkit-scrollbar { width: 5px; }
 #mode-list::-webkit-scrollbar-track { background: #111827; }
@@ -309,8 +354,7 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
 .mode-btn:disabled { color: #374151; cursor: default; }
 #panel-footer { padding: 10px 14px; border-top: 1px solid #374151; }
 #legend-title { font-size: 10px; color: #6b7280; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
-#legend-bar { height: 10px; border-radius: 3px; margin: 4px 0;
-  background: linear-gradient(to right, #ffffcc, #a1dab4, #41b6c4, #2c7fb8, #253494); }
+#legend-bar { height: 10px; border-radius: 3px; margin: 4px 0; }
 .legend-ticks { display: flex; justify-content: space-between; font-size: 10px; color: #6b7280; }
 #geo-note { margin-top: 8px; font-size: 10px; color: #4b5563; line-height: 1.5; }
 .leaflet-tooltip {
@@ -327,22 +371,28 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
   <div id="panel-header">
     <h1>Transport Mode by Area<br>
       <span style="font-weight:400;color:#6b7280">Israel Census</span></h1>
-    <div id="year-toggle">
-      <button class="yr-btn" data-year="2008">2008</button>
-      <button class="yr-btn active" data-year="2022">2022</button>
+    <div id="view-toggle"></div>
+    <div id="change-selectors">
+      <label>From year</label>
+      <select id="sel-from"></select>
+      <label>To year</label>
+      <select id="sel-to"></select>
     </div>
   </div>
   <div id="mode-list"></div>
   <div id="panel-footer">
     <div id="legend-title">Share of commuters</div>
     <div id="legend-bar"></div>
-    <div class="legend-ticks"><span>0%</span><span id="leg-cap">–</span></div>
+    <div class="legend-ticks">
+      <span id="leg-low">0%</span>
+      <span id="leg-mid" style="display:none">0</span>
+      <span id="leg-high">-</span>
+    </div>
     <div id="geo-note">
       Large cities: sub-neighbourhood level<br>
       Medium cities: neighbourhood level<br>
       Small settlements: city level<br>
-      Grey = no data<br>
-      <span style="color:#374151">2022 boundaries used for both years</span>
+      Grey = no data
     </div>
   </div>
 </div>
@@ -350,46 +400,80 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
 <script>
 var CAPS  = __CAPS__;
 var MODES = __MODES__;
+var YEARS = __YEARS__;
 var DATA  = __DATA__;
 
-var currentYear = "2022";
+// ── State ─────────────────────────────────────────────────────────────────────
+var viewMode    = "single";          // "single" | "change"
+var currentYear = String(YEARS[YEARS.length - 1]);
+var fromYear    = String(YEARS[0]);
+var toYear      = String(YEARS[YEARS.length - 1]);
 var currentSlug = "bicycle";
 
+// ── Map ───────────────────────────────────────────────────────────────────────
 var map = L.map('map', { preferCanvas: true }).setView([31.5, 34.9], 8);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com">CARTO</a>',
   subdomains: 'abcd', maxZoom: 19
 }).addTo(map);
 
-var RAMP = ['#ffffcc','#a1dab4','#41b6c4','#2c7fb8','#253494'];
+// ── Colour functions ──────────────────────────────────────────────────────────
 function hexToRgb(h) {
   return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
 }
-function getColor(pct, cap) {
-  if (pct == null) return '#6b7280';
-  var t = Math.min(pct / (cap || 1), 1);
-  var n = RAMP.length - 1;
-  var i = Math.min(Math.floor(t * n), n - 1);
-  var f = t * n - i;
-  var a = hexToRgb(RAMP[i]), b = hexToRgb(RAMP[i+1]);
+function lerp(a, b, f) {
   return 'rgb('+Math.round(a[0]+(b[0]-a[0])*f)+','+Math.round(a[1]+(b[1]-a[1])*f)+','+Math.round(a[2]+(b[2]-a[2])*f)+')';
 }
-
-function propKey() { return 'p' + currentYear.slice(2) + '_' + currentSlug; }
-function nKey()    { return 'n' + currentYear.slice(2); }
-
-function getCap() {
-  var c = (CAPS[currentYear] || {})[currentSlug];
-  return (c != null && c > 0) ? c : 1;
+function rampColor(ramp, t) {
+  var n = ramp.length - 1;
+  var i = Math.min(Math.floor(t * n), n - 1);
+  return lerp(hexToRgb(ramp[i]), hexToRgb(ramp[i+1]), t * n - i);
 }
 
+var RAMP_SEQ = ['#ffffcc','#a1dab4','#41b6c4','#2c7fb8','#253494'];
+// RdBu diverging: index 0 = strong red (big decrease), 4 = neutral, 8 = strong blue (big increase)
+var RAMP_DIV = ['#d73027','#f46d43','#fdae61','#fee090','#ffffbf','#e0f3f8','#abd9e9','#74add1','#4575b4'];
+
+function getColorSingle(pct, cap) {
+  if (pct == null) return '#6b7280';
+  return rampColor(RAMP_SEQ, Math.min(pct / (cap || 1), 1));
+}
+function getColorChange(diff, cap) {
+  if (diff == null) return '#6b7280';
+  // Map [-cap, +cap] → [0, 1]; negative=red(low), positive=blue(high)
+  var t = (Math.max(-cap, Math.min(cap, diff)) / (cap || 1) + 1) / 2;
+  return rampColor(RAMP_DIV, t);
+}
+
+// ── Value/cap helpers ─────────────────────────────────────────────────────────
+function getValue(props) {
+  if (viewMode === "single") {
+    return props["p" + currentYear.slice(-2) + "_" + currentSlug];
+  }
+  var pTo   = props["p" + toYear.slice(-2)   + "_" + currentSlug];
+  var pFrom = props["p" + fromYear.slice(-2) + "_" + currentSlug];
+  if (pTo == null || pFrom == null) return null;
+  return pTo - pFrom;
+}
+
+function getCap() {
+  if (viewMode === "single") {
+    return ((CAPS.single || {})[currentYear] || {})[currentSlug] || 1;
+  }
+  var y1 = Math.min(+fromYear, +toYear);
+  var y2 = Math.max(+fromYear, +toYear);
+  return ((CAPS.change || {})[y1 + "_" + y2] || {})[currentSlug] || 1;
+}
+
+// ── Map layer ─────────────────────────────────────────────────────────────────
 function styleFn(feature) {
-  var p   = feature.properties[propKey()];
+  var val = getValue(feature.properties);
   var cap = getCap();
+  var color = (viewMode === "single") ? getColorSingle(val, cap) : getColorChange(val, cap);
   return {
-    fillColor:   getColor(p, cap),
-    weight:      0.4, color: '#555', opacity: 0.8,
-    fillOpacity: (p == null) ? 0.2 : 0.72,
+    fillColor: color,
+    weight: 0.4, color: '#555', opacity: 0.8,
+    fillOpacity: (val == null) ? 0.2 : 0.72,
   };
 }
 
@@ -400,20 +484,37 @@ var geojsonLayer = L.geoJSON(DATA, {
     layer.on({
       mouseover: function(e) {
         e.target.setStyle({ weight: 2, color: '#fff', fillOpacity: 0.92 });
-        var pct    = p[propKey()];
-        var pctStr = (pct != null) ? pct.toFixed(2) + '%' : 'No data';
-        var n      = p[nKey()];
-        var nStr   = (n != null) ? Math.round(n).toLocaleString() : '—';
-        var mLabel = MODES.find(function(m){ return m.slug === currentSlug; }).label;
+        var val    = getValue(p);
+        var cap    = getCap();
+        var mLabel = (MODES.find(function(m){ return m.slug === currentSlug; }) || {}).label || currentSlug;
+        var valStr, nStr, yearLabel;
+
+        if (viewMode === "single") {
+          valStr    = (val != null) ? val.toFixed(2) + "%" : "No data";
+          var nKey  = "n" + currentYear.slice(-2);
+          var n     = p[nKey];
+          nStr      = (n != null) ? Math.round(n).toLocaleString() : "—";
+          yearLabel = currentYear;
+        } else {
+          var sign  = (val != null && val >= 0) ? "+" : "";
+          valStr    = (val != null) ? sign + val.toFixed(2) + " pp" : "No data";
+          var nFrom = p["n" + fromYear.slice(-2)];
+          var nTo   = p["n" + toYear.slice(-2)];
+          nStr      = (nFrom != null ? Math.round(nFrom).toLocaleString() : "—")
+                    + " → "
+                    + (nTo   != null ? Math.round(nTo).toLocaleString()   : "—");
+          yearLabel = fromYear + " → " + toYear;
+        }
+
         layer.bindTooltip(
           '<div style="min-width:180px;line-height:1.7">' +
-          '<b style="font-size:13px">' + (p.city || '—') + '</b>' +
-          (p.area ? '<br><span style="font-size:11px;color:#9ca3af">' + p.area + '</span>' : '') +
+          '<b style="font-size:13px">' + (p.city || "—") + "</b>" +
+          (p.area ? '<br><span style="font-size:11px;color:#9ca3af">' + p.area + "</span>" : "") +
           '<hr style="border:none;border-top:1px solid #374151;margin:5px 0">' +
-          mLabel + ' (' + currentYear + '):<br>' +
-          '<b style="font-size:14px">' + pctStr + '</b><br>' +
-          '<span style="font-size:10px;color:#9ca3af">Weighted commuters: ' + nStr + '</span>' +
-          '</div>',
+          mLabel + " (" + yearLabel + "):<br>" +
+          '<b style="font-size:14px">' + valStr + "</b><br>" +
+          '<span style="font-size:10px;color:#9ca3af">Weighted commuters: ' + nStr + "</span>" +
+          "</div>",
           { sticky: true }
         ).openTooltip();
       },
@@ -425,46 +526,123 @@ var geojsonLayer = L.geoJSON(DATA, {
   },
 }).addTo(map);
 
-function updateMap() {
-  geojsonLayer.setStyle(styleFn);
+// ── Legend update ─────────────────────────────────────────────────────────────
+function updateLegend() {
   var cap = getCap();
-  document.getElementById('leg-cap').textContent = cap.toFixed(1) + '%';
-  document.querySelectorAll('.mode-btn').forEach(function(b) {
-    b.classList.toggle('active', b.dataset.slug === currentSlug);
-  });
-  document.querySelectorAll('.yr-btn').forEach(function(b) {
-    b.classList.toggle('active', b.dataset.year === currentYear);
-  });
-  // Disable modes not available in 2008
-  document.querySelectorAll('.mode-btn').forEach(function(b) {
-    var mode = MODES.find(function(m){ return m.slug === b.dataset.slug; });
-    b.disabled = (currentYear === '2008' && !mode.has2008);
-    if (b.disabled && b.dataset.slug === currentSlug) {
-      currentSlug = 'bicycle';  // fallback
-      updateMap();
-    }
-  });
+  var bar = document.getElementById("legend-bar");
+  var low = document.getElementById("leg-low");
+  var mid = document.getElementById("leg-mid");
+  var high = document.getElementById("leg-high");
+  var title = document.getElementById("legend-title");
+
+  if (viewMode === "single") {
+    bar.style.background = "linear-gradient(to right, " + RAMP_SEQ.join(",") + ")";
+    low.textContent  = "0%";
+    mid.style.display = "none";
+    high.textContent = cap.toFixed(1) + "%";
+    title.textContent = "Share of commuters";
+  } else {
+    bar.style.background = "linear-gradient(to right, " + RAMP_DIV.join(",") + ")";
+    low.textContent  = "-" + cap.toFixed(1) + " pp";
+    mid.style.display = "inline";
+    mid.textContent  = "0";
+    high.textContent = "+" + cap.toFixed(1) + " pp";
+    title.textContent = "Change (percentage points)";
+  }
 }
 
-// Year buttons
-document.querySelectorAll('.yr-btn').forEach(function(b) {
-  b.onclick = function() { currentYear = b.dataset.year; updateMap(); };
-});
-
-// Mode buttons
-var list = document.getElementById('mode-list');
+// ── Mode buttons ──────────────────────────────────────────────────────────────
+var list = document.getElementById("mode-list");
 MODES.forEach(function(m, i) {
-  var btn = document.createElement('button');
-  btn.className = 'mode-btn' + (m.slug === currentSlug ? ' active' : '');
+  var btn = document.createElement("button");
+  btn.className = "mode-btn" + (m.slug === currentSlug ? " active" : "");
   btn.dataset.slug = m.slug;
-  btn.textContent = (i + 1) + '. ' + m.label;
+  btn.textContent = (i + 1) + ". " + m.label;
   btn.onclick = function() {
-    if (!btn.disabled) { currentSlug = m.slug; updateMap(); }
+    if (!btn.disabled) { currentSlug = m.slug; updateAll(); }
   };
   list.appendChild(btn);
 });
 
-document.getElementById('leg-cap').textContent = getCap().toFixed(1) + '%';
+function updateModeButtons() {
+  document.querySelectorAll(".mode-btn").forEach(function(b) {
+    var mode = MODES.find(function(m){ return m.slug === b.dataset.slug; });
+    b.classList.toggle("active", b.dataset.slug === currentSlug);
+    if (viewMode === "single") {
+      b.disabled = (mode.years.indexOf(+currentYear) === -1);
+    } else {
+      // In change mode: disable if mode missing from either year
+      b.disabled = (mode.years.indexOf(+fromYear) === -1 || mode.years.indexOf(+toYear) === -1);
+    }
+    // If currently selected mode is now disabled, fall back to bicycle
+    if (b.disabled && b.dataset.slug === currentSlug) {
+      currentSlug = "bicycle";
+    }
+  });
+}
+
+// ── Year / change selectors ───────────────────────────────────────────────────
+var viewToggle   = document.getElementById("view-toggle");
+var changeSelectors = document.getElementById("change-selectors");
+var selFrom      = document.getElementById("sel-from");
+var selTo        = document.getElementById("sel-to");
+
+// Build view buttons: one per year + one "Change" button
+YEARS.forEach(function(yr) {
+  var btn = document.createElement("button");
+  btn.className = "view-btn" + (String(yr) === currentYear && viewMode === "single" ? " active" : "");
+  btn.dataset.year = String(yr);
+  btn.textContent  = String(yr);
+  btn.onclick = function() {
+    viewMode    = "single";
+    currentYear = btn.dataset.year;
+    updateAll();
+  };
+  viewToggle.appendChild(btn);
+});
+
+var changeBtn = document.createElement("button");
+changeBtn.className = "view-btn" + (viewMode === "change" ? " active-change" : "");
+changeBtn.textContent = "Change";
+changeBtn.onclick = function() {
+  viewMode = "change";
+  updateAll();
+};
+viewToggle.appendChild(changeBtn);
+
+// Populate From/To dropdowns
+YEARS.forEach(function(yr) {
+  var o1 = document.createElement("option");
+  o1.value = o1.textContent = String(yr);
+  if (String(yr) === fromYear) o1.selected = true;
+  selFrom.appendChild(o1);
+
+  var o2 = document.createElement("option");
+  o2.value = o2.textContent = String(yr);
+  if (String(yr) === toYear) o2.selected = true;
+  selTo.appendChild(o2);
+});
+
+selFrom.onchange = function() { fromYear = selFrom.value; updateAll(); };
+selTo.onchange   = function() { toYear   = selTo.value;   updateAll(); };
+
+// ── Master update ─────────────────────────────────────────────────────────────
+function updateAll() {
+  // Sync view-toggle button states
+  document.querySelectorAll(".view-btn").forEach(function(b) {
+    b.className = "view-btn";
+    if (b.dataset.year && viewMode === "single" && b.dataset.year === currentYear) b.classList.add("active");
+    if (!b.dataset.year && viewMode === "change") b.classList.add("active-change");
+  });
+  // Show/hide change selectors
+  changeSelectors.classList.toggle("visible", viewMode === "change");
+
+  updateModeButtons();
+  geojsonLayer.setStyle(styleFn);
+  updateLegend();
+}
+
+updateAll();
 </script>
 </body>
 </html>
@@ -473,6 +651,7 @@ document.getElementById('leg-cap').textContent = getCap().toFixed(1) + '%';
 html_out = (HTML
     .replace("__CAPS__",  caps_js)
     .replace("__MODES__", modes_js)
+    .replace("__YEARS__", years_js)
     .replace("__DATA__",  geojson_str))
 
 out_path = "transport_mode_israel.html"
@@ -480,5 +659,5 @@ with open(out_path, "w", encoding="utf-8") as f:
     f.write(html_out)
 
 size_mb = len(html_out) / 1_048_576
-print(f"\nSaved → {out_path}  ({size_mb:.1f} MB)")
-print("Done ✓")
+print(f"\nSaved -> {out_path}  ({size_mb:.1f} MB)")
+print("Done")
