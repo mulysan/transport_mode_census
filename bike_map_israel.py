@@ -587,7 +587,7 @@ function rampColor(ramp, t) {
   var a = hexToRgb(ramp[i]), b = hexToRgb(ramp[i+1]);
   return 'rgb('+Math.round(a[0]+(b[0]-a[0])*f)+','+Math.round(a[1]+(b[1]-a[1])*f)+','+Math.round(a[2]+(b[2]-a[2])*f)+')';
 }
-var RAMP_SEQ = ['#ffffcc','#a1dab4','#41b6c4','#2c7fb8','#253494'];
+var RAMP_SEQ = ['#0000b4','#00a8f0','#00d890','#80ff00','#ffff00','#ff8800','#ff0000'];
 var RAMP_DIV = ['#d73027','#f46d43','#fdae61','#fee090','#ffffbf','#e0f3f8','#abd9e9','#74add1','#4575b4'];
 
 function getColorSingle(pct, cap) {
