@@ -303,7 +303,63 @@ def gdf_to_features(gdf, year_tag, city_names=None, extra_cols=None):
     return features
 
 
-# ── 6. Colour caps ────────────────────────────────────────────────────────────
+# ── 6. Dissolved shapes for city / borough aggregation views ─────────────────
+def make_agg_shapes(gdf_large, gdf_medium, gdf_small, city_names):
+    """
+    Build dissolved GeoJSON feature lists for city-level and borough-level views.
+    All inputs must be in METRIC_CRS.
+    Returns (city_features, borough_features).
+    """
+    def _slim(gdf):
+        cols = ["SEMEL_YISHUV", "geometry"]
+        if "ROVA" in gdf.columns:
+            cols.append("ROVA")
+        g = gdf[cols].copy()
+        to_float(g, ["SEMEL_YISHUV"] + (["ROVA"] if "ROVA" in g.columns else []))
+        if "ROVA" not in g.columns:
+            g["ROVA"] = np.nan
+        return gpd.GeoDataFrame(g, crs=METRIC_CRS)
+
+    combined = pd.concat([_slim(gdf_large), _slim(gdf_medium), _slim(gdf_small)],
+                         ignore_index=True)
+    combined = gpd.GeoDataFrame(combined, crs=METRIC_CRS)
+
+    def _feats(diss, level_label):
+        d = diss.to_crs(epsg=4326)
+        d["geometry"] = d["geometry"].simplify(0.002, preserve_topology=True)
+        out = []
+        for _, row in d.iterrows():
+            geom = row["geometry"]
+            if geom is None or geom.is_empty:
+                continue
+            sn = int(row["SEMEL_YISHUV"]) if pd.notna(row.get("SEMEL_YISHUV")) else None
+            en, he = city_names.get(sn, ("","")) if sn else ("","")
+            rv = row.get("ROVA")
+            out.append({"type": "Feature", "properties": {
+                "sn": sn, "city": en if en else he,
+                "rova_code": int(rv) if pd.notna(rv) else None,
+                "area": None, "level": level_label,
+            }, "geometry": mapping(geom)})
+        return out
+
+    # City level: dissolve everything by settlement
+    city_diss = combined.dissolve(by="SEMEL_YISHUV", aggfunc="first").reset_index()
+    city_feats = _feats(city_diss, "city")
+
+    # Borough level: large cities by (settlement, ROVA); medium+small by settlement
+    rova_parts = combined[combined["ROVA"].notna()].dissolve(
+        by=["SEMEL_YISHUV","ROVA"], aggfunc="first").reset_index()
+    other_parts = combined[combined["ROVA"].isna()].dissolve(
+        by="SEMEL_YISHUV", aggfunc="first").reset_index()
+    other_parts["ROVA"] = np.nan
+    rova_diss = gpd.GeoDataFrame(
+        pd.concat([rova_parts, other_parts], ignore_index=True), crs=METRIC_CRS)
+    rova_feats = _feats(rova_diss, "borough")
+
+    return city_feats, rova_feats
+
+
+# ── 7. Colour caps ────────────────────────────────────────────────────────────
 def compute_caps(stats_by_year, change_features_08):
     single_caps = {}
     for yr in YEARS:
@@ -528,6 +584,20 @@ caps = compute_caps({2008: stats_08, 2022: stats_22}, features_08)
 geojson_08 = json.dumps({"type": "FeatureCollection", "features": features_08}, ensure_ascii=False)
 geojson_22 = json.dumps({"type": "FeatureCollection", "features": features_22}, ensure_ascii=False)
 print(f"\nDATA_08: ~{len(geojson_08)//1024} KB,  DATA_22: ~{len(geojson_22)//1024} KB")
+
+print("\nBuilding dissolved city / borough shapes ...")
+city_feats_08, rova_feats_08 = make_agg_shapes(
+    g08_large.to_crs(METRIC_CRS), g08_medium.to_crs(METRIC_CRS), g08_small.to_crs(METRIC_CRS),
+    city_names)
+city_feats_22, rova_feats_22 = make_agg_shapes(
+    g22_large.to_crs(METRIC_CRS), g22_medium.to_crs(METRIC_CRS), g22_small.to_crs(METRIC_CRS),
+    city_names)
+print(f"  08: city={len(city_feats_08)}, borough={len(rova_feats_08)}")
+print(f"  22: city={len(city_feats_22)}, borough={len(rova_feats_22)}")
+geojson_city_08 = json.dumps({"type": "FeatureCollection", "features": city_feats_08}, ensure_ascii=False)
+geojson_rova_08 = json.dumps({"type": "FeatureCollection", "features": rova_feats_08}, ensure_ascii=False)
+geojson_city_22 = json.dumps({"type": "FeatureCollection", "features": city_feats_22}, ensure_ascii=False)
+geojson_rova_22 = json.dumps({"type": "FeatureCollection", "features": rova_feats_22}, ensure_ascii=False)
 
 caps_js   = json.dumps(caps)
 years_js  = json.dumps(YEARS)
@@ -797,8 +867,12 @@ var YEARS       = __YEARS__;
 var CITY_LABELS = __LABELS__;
 var CITY_STATS  = __CITY_STATS__;
 var ROVA_STATS  = __ROVA_STATS__;
-var DATA_08     = __DATA_08__;
-var DATA_22     = __DATA_22__;
+var DATA_08      = __DATA_08__;
+var DATA_22      = __DATA_22__;
+var DATA_CITY_08 = __DATA_CITY_08__;
+var DATA_CITY_22 = __DATA_CITY_22__;
+var DATA_ROVA_08 = __DATA_ROVA_08__;
+var DATA_ROVA_22 = __DATA_ROVA_22__;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 var viewMode    = "single";
@@ -963,8 +1037,18 @@ function makeOnEach(feature, layer) {
       } else {
         var sign  = (val != null && val >= 0) ? "+" : "";
         valStr    = (val != null) ? sign + val.toFixed(2) + " pp" : "No data";
-        var nFrom = p["n" + fromYear.slice(-2)];
-        var nTo   = p["n" + toYear.slice(-2)];
+        var nFrom, nTo;
+        if (aggLevel === "city") {
+          var cf = (CITY_STATS[fromYear] || {})[String(p.sn)];
+          var ct = (CITY_STATS[toYear]   || {})[String(p.sn)];
+          nFrom = cf ? cf.n : null; nTo = ct ? ct.n : null;
+        } else if (aggLevel === "rova" && p.rova_code != null) {
+          var rf = ((ROVA_STATS[fromYear] || {})[String(p.sn)] || {})[String(p.rova_code)];
+          var rt = ((ROVA_STATS[toYear]   || {})[String(p.sn)] || {})[String(p.rova_code)];
+          nFrom = rf ? rf.n : null; nTo = rt ? rt.n : null;
+        } else {
+          nFrom = p["n" + fromYear.slice(-2)]; nTo = p["n" + toYear.slice(-2)];
+        }
         nStr      = (nFrom != null ? Math.round(nFrom).toLocaleString() : "\u2014")
                   + " \u2192 "
                   + (nTo   != null ? Math.round(nTo).toLocaleString()   : "\u2014");
@@ -991,9 +1075,15 @@ function makeOnEach(feature, layer) {
 }
 
 function getActiveData() {
-  // Change view and 2008 single-year both use DATA_08 (2008 geometry)
-  if (viewMode === "change" || currentYear === "2008") return DATA_08;
-  return DATA_22;
+  var use08 = (viewMode === "change" || currentYear === "2008");
+  if (aggLevel === "city") return use08 ? DATA_CITY_08 : DATA_CITY_22;
+  if (aggLevel === "rova") return use08 ? DATA_ROVA_08 : DATA_ROVA_22;
+  return use08 ? DATA_08 : DATA_22;
+}
+
+function getSubData() {
+  // Always returns sub-borough features (for CSV sub export)
+  return (viewMode === "change" || currentYear === "2008") ? DATA_08 : DATA_22;
 }
 
 function rebuildLayer() {
@@ -1197,7 +1287,7 @@ function downloadCSV(level) {
     if (isChange) {
       rows.push(["SEMEL_YISHUV","CITY_NAME","BOROUGH","SUB_BOROUGH","LEVEL","YEAR_FROM","YEAR_TO","N_FROM","N_TO"].concat(modeHeaders));
       var t1 = fromYear.slice(-2), t2 = yr.slice(-2);
-      getActiveData().features.forEach(function(f) {
+      getSubData().features.forEach(function(f) {
         var p = f.properties;
         var n1 = p["n"+t1], n2 = p["n"+t2];
         rows.push([p.sn||"", '"'+(p.city||"")+'"', p.rova_code||"", p.area||"", p.level||"",
@@ -1210,7 +1300,7 @@ function downloadCSV(level) {
     } else {
       rows.push(["SEMEL_YISHUV","CITY_NAME","BOROUGH","SUB_BOROUGH","LEVEL","YEAR","N_COMMUTERS"].concat(modeHeaders));
       var yrTag = yr.slice(-2);
-      getActiveData().features.forEach(function(f) {
+      getSubData().features.forEach(function(f) {
         var p = f.properties;
         var n = p["n"+yrTag];
         rows.push([p.sn||"", '"'+(p.city||"")+'"', p.rova_code||"", p.area||"", p.level||"", yr,
@@ -1284,7 +1374,11 @@ html_out = (HTML
     .replace("__CITY_STATS__",  city_stats_js)
     .replace("__ROVA_STATS__",  rova_stats_js)
     .replace("__DATA_08__",     geojson_08)
-    .replace("__DATA_22__",     geojson_22))
+    .replace("__DATA_22__",     geojson_22)
+    .replace("__DATA_CITY_08__", geojson_city_08)
+    .replace("__DATA_CITY_22__", geojson_city_22)
+    .replace("__DATA_ROVA_08__", geojson_rova_08)
+    .replace("__DATA_ROVA_22__", geojson_rova_22))
 
 out_path = "transport_mode_israel.html"
 with open(out_path, "w", encoding="utf-8") as f:
