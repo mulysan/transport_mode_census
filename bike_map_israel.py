@@ -289,6 +289,8 @@ def gdf_to_features(gdf, year_tag, city_names=None, extra_cols=None):
             area = None
 
         props = {"city": city, "area": area, "level": level,
+                 "sn": int(row["SEMEL_YISHUV"]) if pd.notna(row.get("SEMEL_YISHUV")) else None,
+                 "rova_code": int(rova) if pd.notna(rova) else None,
                  f"n{year_tag}": safe_float(row.get("w_tot"))}
         for s in SLUGS:
             props[f"p{year_tag}_{s}"] = safe_float(row.get(f"pct_{s}"))
@@ -340,6 +342,100 @@ def compute_caps(stats_by_year, change_features_08):
             change_caps[pair_key] = pair_caps
 
     return {"single": single_caps, "change": change_caps}
+
+
+# ── 7. Aggregate stats to city / ROVA level ───────────────────────────────────
+def aggregate_stats(all_year_stats):
+    """
+    From the finest-grain stats, compute:
+      city_stats[year][semel]           = {slug: pct, "n": float}
+      rova_stats[year][semel][rova]     = {slug: pct, "n": float}
+    Uses weighted-mean formula: recover wm = pct*w_tot/100, then re-aggregate.
+    """
+    city_stats = {}
+    rova_stats = {}
+
+    for year, stats in all_year_stats.items():
+        city_acc  = {}   # {sn: {slug: wm_sum, "w_tot": float}}
+        rova_acc  = {}   # {sn: {rova: {slug: wm_sum, "w_tot": float}}}
+
+        for tier, df in stats.items():
+            for _, row in df.iterrows():
+                sn  = int(row[SETT_COL])
+                w   = float(row["w_tot"])
+
+                # city accumulator
+                if sn not in city_acc:
+                    city_acc[sn] = {"w_tot": 0, **{s: 0.0 for s in SLUGS}}
+                city_acc[sn]["w_tot"] += w
+                for s in SLUGS:
+                    city_acc[sn][s] += row[f"pct_{s}"] * w / 100.0
+
+                # rova accumulator (large-city tier only)
+                if tier == "large" and pd.notna(row.get(ROVA_COL)):
+                    rv = int(row[ROVA_COL])
+                    rova_acc.setdefault(sn, {}).setdefault(rv, {"w_tot": 0, **{s: 0.0 for s in SLUGS}})
+                    rova_acc[sn][rv]["w_tot"] += w
+                    for s in SLUGS:
+                        rova_acc[sn][rv][s] += row[f"pct_{s}"] * w / 100.0
+
+        def finalise(acc):
+            out = {}
+            for k, d in acc.items():
+                wt = d["w_tot"]
+                out[k] = {"n": round(wt, 1)}
+                for s in SLUGS:
+                    out[k][s] = round(d[s] / wt * 100, 3) if wt > 0 else 0.0
+            return out
+
+        city_stats[year] = finalise(city_acc)
+        rova_stats[year] = {sn: finalise(rv_d) for sn, rv_d in rova_acc.items()}
+
+    return city_stats, rova_stats
+
+
+# ── 8. CSV export ─────────────────────────────────────────────────────────────
+def export_csvs(all_year_stats, city_stats, rova_stats, city_names):
+    out_dir = "csv_exports"
+    os.makedirs(out_dir, exist_ok=True)
+    headers_mode = [m["label"] for m in MODES]
+
+    for year in YEARS:
+        # City-level CSV
+        with open(f"{out_dir}/transport_{year}_city.csv", "w", encoding="utf-8") as f:
+            f.write(",".join(["SEMEL_YISHUV","CITY_NAME","N_COMMUTERS"] + headers_mode) + "\n")
+            for sn, d in sorted(city_stats[year].items()):
+                nm = city_names.get(sn, ("?",""))[0] or str(sn)
+                vals = [sn, f'"{nm}"', round(d["n"])] + [d.get(s, "") for s in SLUGS]
+                f.write(",".join(str(v) for v in vals) + "\n")
+
+        # ROVA-level CSV
+        with open(f"{out_dir}/transport_{year}_rova.csv", "w", encoding="utf-8") as f:
+            f.write(",".join(["SEMEL_YISHUV","CITY_NAME","ROVA","N_COMMUTERS"] + headers_mode) + "\n")
+            for sn, rv_dict in sorted(rova_stats[year].items()):
+                nm = city_names.get(sn, ("?",""))[0] or str(sn)
+                for rv, d in sorted(rv_dict.items()):
+                    vals = [sn, f'"{nm}"', rv, round(d["n"])] + [d.get(s, "") for s in SLUGS]
+                    f.write(",".join(str(v) for v in vals) + "\n")
+
+        # TAT_ROVA-level CSV (finest)
+        with open(f"{out_dir}/transport_{year}_tatrova.csv", "w", encoding="utf-8") as f:
+            f.write(",".join(["SEMEL_YISHUV","CITY_NAME","ROVA","TAT_ROVA","N_COMMUTERS"] + headers_mode) + "\n")
+            stats = all_year_stats[year]
+            for tier, rova_col, tat_col in [
+                ("large",  ROVA_COL, AREA_COL),
+                ("medium", None,     AREA_COL),
+                ("small",  None,     None),
+            ]:
+                for _, row in stats[tier].iterrows():
+                    sn = int(row[SETT_COL])
+                    nm = city_names.get(sn, ("?",""))[0] or str(sn)
+                    rv = int(row[rova_col]) if rova_col and pd.notna(row.get(rova_col)) else ""
+                    at = int(row[tat_col])  if tat_col  and pd.notna(row.get(tat_col))  else ""
+                    vals = [sn, f'"{nm}"', rv, at, round(row["w_tot"])] + [round(row[f"pct_{s}"],3) for s in SLUGS]
+                    f.write(",".join(str(v) for v in vals) + "\n")
+
+    print(f"  CSVs written to {out_dir}/")
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -442,6 +538,21 @@ modes_js  = json.dumps([
     for m in MODES
 ], ensure_ascii=False)
 
+print("\nComputing city / ROVA level aggregates ...")
+city_stats, rova_stats = aggregate_stats({2008: stats_08, 2022: stats_22})
+print(f"  Cities: {sum(len(v) for v in city_stats.values())//len(YEARS)}, "
+      f"ROVA groups: {sum(sum(len(rv) for rv in v.values()) for v in rova_stats.values())//len(YEARS)}")
+
+# Convert integer keys to strings for JSON (JSON only supports string keys)
+city_stats_js = json.dumps(
+    {str(yr): {str(sn): v for sn, v in yr_d.items()} for yr, yr_d in city_stats.items()})
+rova_stats_js = json.dumps(
+    {str(yr): {str(sn): {str(rv): v for rv, v in rv_d.items()}
+               for sn, rv_d in yr_d.items()} for yr, yr_d in rova_stats.items()})
+
+print("Exporting CSV files ...")
+export_csvs({2008: stats_08, 2022: stats_22}, city_stats, rova_stats, city_names)
+
 
 
 # ── HTML template ─────────────────────────────────────────────────────────────
@@ -473,6 +584,14 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
 .view-btn:hover { background: #374151; color: #f3f4f6; }
 .view-btn.active { background: #0369a1; border-color: #0284c7; color: #fff; }
 .view-btn.active-change { background: #7c3aed; border-color: #8b5cf6; color: #fff; }
+#level-toggle { display: flex; gap: 4px; margin-top: 6px; }
+.lvl-btn {
+  flex: 1; padding: 4px 4px; border-radius: 4px; border: 1px solid #374151;
+  background: #111827; color: #9ca3af; cursor: pointer; font-size: 11px;
+  font-weight: 600; transition: all 0.12s;
+}
+.lvl-btn:hover { background: #374151; color: #f3f4f6; }
+.lvl-btn.active { background: #064e3b; border-color: #065f46; color: #6ee7b7; }
 #change-selectors {
   display: none; margin-top: 8px; padding: 8px 10px;
   background: #111827; border-radius: 6px; border: 1px solid #374151;
@@ -526,6 +645,11 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
     <h1>Transport Mode by Area<br>
       <span style="font-weight:400;color:#6b7280">Israel Census</span></h1>
     <div id="view-toggle"></div>
+    <div id="level-toggle">
+      <button class="lvl-btn active" data-lvl="sub">Sub-area</button>
+      <button class="lvl-btn" data-lvl="rova">ROVA</button>
+      <button class="lvl-btn" data-lvl="city">City</button>
+    </div>
     <div id="change-selectors">
       <label>From year</label>
       <select id="sel-from"></select>
@@ -543,24 +667,35 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
       <span id="leg-high">-</span>
     </div>
     <div id="geo-note">
-      Large cities: sub-neighbourhood level<br>
-      Medium cities: neighbourhood level<br>
-      Small settlements: city level<br>
-      Grey = no data<br>
-      <span id="change-note" style="display:none;color:#7c3aed">
+      <span id="level-note-sub">Large: sub-neighbourhood | Med: neighbourhood | Small: city</span>
+      <span id="level-note-rova" style="display:none">Large: ROVA | Med: neighbourhood | Small: city</span>
+      <span id="level-note-city" style="display:none">All settlements at city level</span>
+      <br>Grey = no data
+      <br><span id="change-note" style="display:none;color:#7c3aed">
         Change view uses 2008 boundaries.<br>
         2022 values are area-weighted.
       </span>
     </div>
+    <div style="margin-top:8px">
+      <div style="font-size:10px;color:#6b7280;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Export CSV</div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap">
+        <button onclick="downloadCSV('city')"  style="flex:1;padding:4px;font-size:10px;background:#1f2937;border:1px solid #374151;color:#9ca3af;border-radius:3px;cursor:pointer">City</button>
+        <button onclick="downloadCSV('rova')"  style="flex:1;padding:4px;font-size:10px;background:#1f2937;border:1px solid #374151;color:#9ca3af;border-radius:3px;cursor:pointer">ROVA</button>
+        <button onclick="downloadCSV('sub')"   style="flex:1;padding:4px;font-size:10px;background:#1f2937;border:1px solid #374151;color:#9ca3af;border-radius:3px;cursor:pointer">Sub-area</button>
+      </div>
+      <div style="font-size:9px;color:#4b5563;margin-top:3px">Exports current year's data</div>
+    </div>
   </div>
 </div>
 <script>
-var CAPS       = __CAPS__;
-var MODES      = __MODES__;
-var YEARS      = __YEARS__;
+var CAPS        = __CAPS__;
+var MODES       = __MODES__;
+var YEARS       = __YEARS__;
 var CITY_LABELS = __LABELS__;
-var DATA_08    = __DATA_08__;
-var DATA_22    = __DATA_22__;
+var CITY_STATS  = __CITY_STATS__;
+var ROVA_STATS  = __ROVA_STATS__;
+var DATA_08     = __DATA_08__;
+var DATA_22     = __DATA_22__;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 var viewMode    = "single";
@@ -568,6 +703,7 @@ var currentYear = String(YEARS[YEARS.length - 1]);
 var fromYear    = String(YEARS[0]);
 var toYear      = String(YEARS[YEARS.length - 1]);
 var currentSlug = "bicycle";
+var aggLevel    = "sub";   // "sub" | "rova" | "city"
 
 // ── Map ───────────────────────────────────────────────────────────────────────
 var map = L.map('map', { preferCanvas: true }).setView([31.5, 34.9], 8);
@@ -588,7 +724,8 @@ function rampColor(ramp, t) {
   return 'rgb('+Math.round(a[0]+(b[0]-a[0])*f)+','+Math.round(a[1]+(b[1]-a[1])*f)+','+Math.round(a[2]+(b[2]-a[2])*f)+')';
 }
 var RAMP_SEQ = ['#0000b4','#00a8f0','#00d890','#80ff00','#ffff00','#ff8800','#ff0000'];
-var RAMP_DIV = ['#d73027','#f46d43','#fdae61','#fee090','#ffffbf','#e0f3f8','#abd9e9','#74add1','#4575b4'];
+// Diverging: decrease (left) = red/orange, zero = white/yellow, increase (right) = green/blue
+var RAMP_DIV = ['#ff0000','#ff8800','#ffff00','#ffffff','#80ff00','#00a8f0','#0000b4'];
 
 function getColorSingle(pct, cap) {
   if (pct == null) return '#6b7280';
@@ -601,24 +738,85 @@ function getColorChange(diff, cap) {
 }
 
 // ── Value / cap ───────────────────────────────────────────────────────────────
+function lookupCity(year, sn, slug) {
+  var d = (CITY_STATS[year] || {})[sn];
+  return d ? d[slug] : null;
+}
+function lookupRova(year, sn, rova, slug) {
+  if (rova == null) return lookupCity(year, sn, slug);  // fall back for non-large cities
+  var d = ((ROVA_STATS[year] || {})[sn] || {})[rova];
+  return d ? d[slug] : null;
+}
+
 function getValue(props) {
+  var sn   = String(props.sn);
+  var rova = props.rova_code != null ? String(props.rova_code) : null;
+
   if (viewMode === "single") {
-    return props["p" + currentYear.slice(-2) + "_" + currentSlug];
+    var yr = currentYear;
+    if (aggLevel === "city") return lookupCity(yr, sn, currentSlug);
+    if (aggLevel === "rova") return lookupRova(yr, sn, rova, currentSlug);
+    return props["p" + yr.slice(-2) + "_" + currentSlug];
   }
-  // change: DATA_08 has p08_* (exact) and p22_* (area-weighted)
-  var pTo   = props["p" + toYear.slice(-2)   + "_" + currentSlug];
-  var pFrom = props["p" + fromYear.slice(-2) + "_" + currentSlug];
+  // change mode
+  var getVal = function(yr) {
+    if (aggLevel === "city") return lookupCity(yr, sn, currentSlug);
+    if (aggLevel === "rova") return lookupRova(yr, sn, rova, currentSlug);
+    return props["p" + yr.slice(-2) + "_" + currentSlug];
+  };
+  var pTo = getVal(toYear), pFrom = getVal(fromYear);
   if (pTo == null || pFrom == null) return null;
   return pTo - pFrom;
 }
 
+function percentile95(vals) {
+  if (!vals.length) return 1;
+  vals = vals.slice().sort(function(a,b){return a-b;});
+  return vals[Math.floor(vals.length * 0.95)] || 1;
+}
+
 function getCap() {
-  if (viewMode === "single") {
-    return ((CAPS.single || {})[currentYear] || {})[currentSlug] || 1;
+  if (aggLevel === "sub") {
+    if (viewMode === "single")
+      return ((CAPS.single || {})[currentYear] || {})[currentSlug] || 1;
+    var y1 = Math.min(+fromYear, +toYear), y2 = Math.max(+fromYear, +toYear);
+    return ((CAPS.change || {})[y1 + "_" + y2] || {})[currentSlug] || 1;
   }
-  var y1 = Math.min(+fromYear, +toYear);
-  var y2 = Math.max(+fromYear, +toYear);
-  return ((CAPS.change || {})[y1 + "_" + y2] || {})[currentSlug] || 1;
+  // Compute cap from CITY_STATS or ROVA_STATS
+  var yr = viewMode === "single" ? currentYear : String(Math.max(+fromYear, +toYear));
+  var vals = [];
+  if (aggLevel === "city") {
+    Object.values(CITY_STATS[yr] || {}).forEach(function(d) {
+      if (d[currentSlug] != null) vals.push(d[currentSlug]);
+    });
+  } else {
+    Object.values(ROVA_STATS[yr] || {}).forEach(function(rvDict) {
+      Object.values(rvDict).forEach(function(d) {
+        if (d[currentSlug] != null) vals.push(d[currentSlug]);
+      });
+    });
+  }
+  if (viewMode === "change") {
+    var yr2 = String(Math.min(+fromYear, +toYear));
+    var diffs = [];
+    if (aggLevel === "city") {
+      Object.keys(CITY_STATS[yr] || {}).forEach(function(sn) {
+        var v1 = (CITY_STATS[yr2][sn] || {})[currentSlug];
+        var v2 = (CITY_STATS[yr] [sn] || {})[currentSlug];
+        if (v1 != null && v2 != null) diffs.push(Math.abs(v2 - v1));
+      });
+    } else {
+      Object.keys(ROVA_STATS[yr] || {}).forEach(function(sn) {
+        Object.keys((ROVA_STATS[yr][sn]) || {}).forEach(function(rv) {
+          var v1 = ((ROVA_STATS[yr2][sn] || {})[rv] || {})[currentSlug];
+          var v2 = ((ROVA_STATS[yr] [sn] || {})[rv] || {})[currentSlug];
+          if (v1 != null && v2 != null) diffs.push(Math.abs(v2 - v1));
+        });
+      });
+    }
+    return percentile95(diffs) || 1;
+  }
+  return percentile95(vals) || 1;
 }
 
 // ── Layer management ──────────────────────────────────────────────────────────
@@ -645,9 +843,18 @@ function makeOnEach(feature, layer) {
       var mLabel = (MODES.find(function(m){ return m.slug === currentSlug; }) || {}).label || currentSlug;
       var valStr, nStr, yearLabel;
 
+      // Aggregate-level label under city name
+      var areaLabel = p.area;
+      if (aggLevel === "city") areaLabel = "City level";
+      else if (aggLevel === "rova" && p.rova_code != null) areaLabel = "ROVA " + p.rova_code;
+
       if (viewMode === "single") {
         valStr    = (val != null) ? val.toFixed(2) + "%" : "No data";
-        var n     = p["n" + currentYear.slice(-2)];
+        // n: prefer aggregated stat count when in agg mode
+        var n;
+        if (aggLevel === "city") { var cd = (CITY_STATS[currentYear] || {})[String(p.sn)]; n = cd ? cd.n : null; }
+        else if (aggLevel === "rova" && p.rova_code != null) { var rd = ((ROVA_STATS[currentYear] || {})[String(p.sn)] || {})[String(p.rova_code)]; n = rd ? rd.n : null; }
+        else n = p["n" + currentYear.slice(-2)];
         nStr      = (n != null) ? Math.round(n).toLocaleString() : "\u2014";
         yearLabel = currentYear;
       } else {
@@ -664,7 +871,7 @@ function makeOnEach(feature, layer) {
       layer.bindTooltip(
         '<div style="min-width:180px;line-height:1.7">' +
         '<b style="font-size:13px">' + (p.city || "\u2014") + "</b>" +
-        (p.area ? '<br><span style="font-size:11px;color:#9ca3af">' + p.area + "</span>" : "") +
+        (areaLabel ? '<br><span style="font-size:11px;color:#9ca3af">' + areaLabel + "</span>" : "") +
         '<hr style="border:none;border-top:1px solid #374151;margin:5px 0">' +
         mLabel + " (" + yearLabel + "):<br>" +
         '<b style="font-size:14px">' + valStr + "</b><br>" +
@@ -797,6 +1004,72 @@ function updateAll(rebuild) {
   }
 }
 
+// ── Level toggle ──────────────────────────────────────────────────────────────
+document.querySelectorAll(".lvl-btn").forEach(function(b) {
+  b.onclick = function() {
+    aggLevel = b.dataset.lvl;
+    document.querySelectorAll(".lvl-btn").forEach(function(x) { x.classList.remove("active"); });
+    b.classList.add("active");
+    // Update geo-note
+    document.getElementById("level-note-sub") .style.display = aggLevel === "sub"  ? "" : "none";
+    document.getElementById("level-note-rova").style.display = aggLevel === "rova" ? "" : "none";
+    document.getElementById("level-note-city").style.display = aggLevel === "city" ? "" : "none";
+    updateAll(false);
+  };
+});
+
+// ── CSV download ──────────────────────────────────────────────────────────────
+function downloadCSV(level) {
+  var yr = (viewMode === "single") ? currentYear : toYear;
+  var slugs = MODES.map(function(m){ return m.slug; });
+  var headers = MODES.map(function(m){ return m.label; });
+  var rows = [];
+
+  if (level === "city") {
+    rows.push(["SEMEL_YISHUV","CITY_NAME","YEAR","N_COMMUTERS"].concat(headers));
+    var cityData = CITY_STATS[yr] || {};
+    // Build reverse lookup sn→city name from features
+    var snToName = {};
+    getActiveData().features.forEach(function(f) {
+      var sn = f.properties.sn;
+      if (sn && !snToName[sn]) snToName[sn] = f.properties.city;
+    });
+    Object.keys(cityData).sort(function(a,b){return +a-+b;}).forEach(function(sn) {
+      var d = cityData[sn];
+      rows.push([sn, '"'+(snToName[sn]||sn)+'"', yr, Math.round(d.n)].concat(slugs.map(function(s){ return d[s] != null ? d[s] : ""; })));
+    });
+  } else if (level === "rova") {
+    rows.push(["SEMEL_YISHUV","CITY_NAME","ROVA","YEAR","N_COMMUTERS"].concat(headers));
+    var snToName2 = {};
+    getActiveData().features.forEach(function(f) { var sn = f.properties.sn; if (sn && !snToName2[sn]) snToName2[sn] = f.properties.city; });
+    var rovaData = ROVA_STATS[yr] || {};
+    Object.keys(rovaData).sort(function(a,b){return +a-+b;}).forEach(function(sn) {
+      Object.keys(rovaData[sn]).sort(function(a,b){return +a-+b;}).forEach(function(rv) {
+        var d = rovaData[sn][rv];
+        rows.push([sn, '"'+(snToName2[sn]||sn)+'"', rv, yr, Math.round(d.n)].concat(slugs.map(function(s){ return d[s] != null ? d[s] : ""; })));
+      });
+    });
+  } else {
+    // sub-area level from GeoJSON features
+    rows.push(["SEMEL_YISHUV","CITY_NAME","ROVA","TAT_ROVA","LEVEL","YEAR","N_COMMUTERS"].concat(headers));
+    var yrTag = yr.slice(-2);
+    var prop = function(f, s) { var v = f.properties["p"+yrTag+"_"+s]; return v != null ? v : ""; };
+    var nProp = function(f) { var v = f.properties["n"+yrTag]; return v != null ? Math.round(v) : ""; };
+    getActiveData().features.forEach(function(f) {
+      var p = f.properties;
+      rows.push([p.sn||"", '"'+(p.city||"")+'"', p.rova_code||"", p.area||"", p.level||"", yr, nProp(f)].concat(slugs.map(function(s){ return prop(f,s); })));
+    });
+  }
+
+  var csv = rows.map(function(r){ return r.join(","); }).join("\n");
+  var blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement("a");
+  a.href   = url; a.download = "transport_"+level+"_"+yr+".csv";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+}
+
 // ── City name labels ──────────────────────────────────────────────────────────
 var labelLayer = L.layerGroup();
 var labelsBuilt = false;
@@ -839,12 +1112,14 @@ updateAll(false);
 """
 
 html_out = (HTML
-    .replace("__CAPS__",    caps_js)
-    .replace("__MODES__",   modes_js)
-    .replace("__YEARS__",   years_js)
-    .replace("__LABELS__",  labels_js)
-    .replace("__DATA_08__", geojson_08)
-    .replace("__DATA_22__", geojson_22))
+    .replace("__CAPS__",        caps_js)
+    .replace("__MODES__",       modes_js)
+    .replace("__YEARS__",       years_js)
+    .replace("__LABELS__",      labels_js)
+    .replace("__CITY_STATS__",  city_stats_js)
+    .replace("__ROVA_STATS__",  rova_stats_js)
+    .replace("__DATA_08__",     geojson_08)
+    .replace("__DATA_22__",     geojson_22))
 
 out_path = "transport_mode_israel.html"
 with open(out_path, "w", encoding="utf-8") as f:
