@@ -1,4 +1,4 @@
-SEMEL_YISHUV,CITY_NAME,ROVA,N_COMMUTERS,Private car - driver,Private car - passenger,Public bus,Light rail / metro,Employer transport,Israel Railways,Service taxi,Special taxi,Motorcycle / moped,Bicycle,Walking,Truck,Other vehicle
+SEMEL_YISHUV,CITY_NAME,BOROUGH,N_COMMUTERS,Private car - driver,Private car - passenger,Public bus,Light rail / metro,Employer transport,Israel Railways,Service taxi,Special taxi,Motorcycle / moped,Bicycle,Walking,Truck,Other vehicle
 70,"ASHDOD",1,14335,37.749,4.126,27.063,0.216,12.602,0.417,0.128,0.45,0.466,1.219,14.669,0.329,0.566
 70,"ASHDOD",2,9409,25.554,4.377,31.314,0.025,7.784,0.851,0.243,0.709,0.144,0.506,27.344,0.162,0.986
 70,"ASHDOD",3,11857,61.771,3.371,12.271,0.241,9.401,1.975,0.25,0.567,0.486,0.92,7.649,0.424,0.674

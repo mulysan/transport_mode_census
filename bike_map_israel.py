@@ -409,18 +409,18 @@ def export_csvs(all_year_stats, city_stats, rova_stats, city_names):
                 vals = [sn, f'"{nm}"', round(d["n"])] + [d.get(s, "") for s in SLUGS]
                 f.write(",".join(str(v) for v in vals) + "\n")
 
-        # ROVA-level CSV
-        with open(f"{out_dir}/transport_{year}_rova.csv", "w", encoding="utf-8") as f:
-            f.write(",".join(["SEMEL_YISHUV","CITY_NAME","ROVA","N_COMMUTERS"] + headers_mode) + "\n")
+        # Borough-level CSV
+        with open(f"{out_dir}/transport_{year}_borough.csv", "w", encoding="utf-8") as f:
+            f.write(",".join(["SEMEL_YISHUV","CITY_NAME","BOROUGH","N_COMMUTERS"] + headers_mode) + "\n")
             for sn, rv_dict in sorted(rova_stats[year].items()):
                 nm = city_names.get(sn, ("?",""))[0] or str(sn)
                 for rv, d in sorted(rv_dict.items()):
                     vals = [sn, f'"{nm}"', rv, round(d["n"])] + [d.get(s, "") for s in SLUGS]
                     f.write(",".join(str(v) for v in vals) + "\n")
 
-        # TAT_ROVA-level CSV (finest)
-        with open(f"{out_dir}/transport_{year}_tatrova.csv", "w", encoding="utf-8") as f:
-            f.write(",".join(["SEMEL_YISHUV","CITY_NAME","ROVA","TAT_ROVA","N_COMMUTERS"] + headers_mode) + "\n")
+        # Sub-borough-level CSV (finest)
+        with open(f"{out_dir}/transport_{year}_subborough.csv", "w", encoding="utf-8") as f:
+            f.write(",".join(["SEMEL_YISHUV","CITY_NAME","BOROUGH","SUB_BOROUGH","N_COMMUTERS"] + headers_mode) + "\n")
             stats = all_year_stats[year]
             for tier, rova_col, tat_col in [
                 ("large",  ROVA_COL, AREA_COL),
@@ -1020,52 +1020,109 @@ document.querySelectorAll(".lvl-btn").forEach(function(b) {
 
 // ── CSV download ──────────────────────────────────────────────────────────────
 function downloadCSV(level) {
-  var yr = (viewMode === "single") ? currentYear : toYear;
-  var slugs = MODES.map(function(m){ return m.slug; });
-  var headers = MODES.map(function(m){ return m.label; });
+  var isChange = (viewMode === "change");
+  var yr = isChange ? toYear : currentYear;
+
+  // In change mode only export modes available in both years
+  var slugs = MODES
+    .filter(function(m){ return !isChange || (m.years.indexOf(+fromYear) !== -1 && m.years.indexOf(+toYear) !== -1); })
+    .map(function(m){ return m.slug; });
+  var modeHeaders = slugs.map(function(s) {
+    var m = MODES.find(function(m){ return m.slug === s; });
+    return isChange ? m.label + " (pp change)" : m.label;
+  });
+
+  // Build sn→city name lookup
+  var snToName = {};
+  getActiveData().features.forEach(function(f) {
+    var sn = f.properties.sn;
+    if (sn && !snToName[sn]) snToName[sn] = f.properties.city;
+  });
+
+  function chg(d1, d2, s) {
+    if (!d2 || d2[s] == null) return "";
+    if (!d1 || d1[s] == null) return "";
+    return Math.round((d2[s] - d1[s]) * 1000) / 1000;
+  }
+
   var rows = [];
 
   if (level === "city") {
-    rows.push(["SEMEL_YISHUV","CITY_NAME","YEAR","N_COMMUTERS"].concat(headers));
-    var cityData = CITY_STATS[yr] || {};
-    // Build reverse lookup sn→city name from features
-    var snToName = {};
-    getActiveData().features.forEach(function(f) {
-      var sn = f.properties.sn;
-      if (sn && !snToName[sn]) snToName[sn] = f.properties.city;
-    });
-    Object.keys(cityData).sort(function(a,b){return +a-+b;}).forEach(function(sn) {
-      var d = cityData[sn];
-      rows.push([sn, '"'+(snToName[sn]||sn)+'"', yr, Math.round(d.n)].concat(slugs.map(function(s){ return d[s] != null ? d[s] : ""; })));
-    });
-  } else if (level === "rova") {
-    rows.push(["SEMEL_YISHUV","CITY_NAME","ROVA","YEAR","N_COMMUTERS"].concat(headers));
-    var snToName2 = {};
-    getActiveData().features.forEach(function(f) { var sn = f.properties.sn; if (sn && !snToName2[sn]) snToName2[sn] = f.properties.city; });
-    var rovaData = ROVA_STATS[yr] || {};
-    Object.keys(rovaData).sort(function(a,b){return +a-+b;}).forEach(function(sn) {
-      Object.keys(rovaData[sn]).sort(function(a,b){return +a-+b;}).forEach(function(rv) {
-        var d = rovaData[sn][rv];
-        rows.push([sn, '"'+(snToName2[sn]||sn)+'"', rv, yr, Math.round(d.n)].concat(slugs.map(function(s){ return d[s] != null ? d[s] : ""; })));
+    if (isChange) {
+      rows.push(["SEMEL_YISHUV","CITY_NAME","YEAR_FROM","YEAR_TO","N_FROM","N_TO"].concat(modeHeaders));
+      var cd1 = CITY_STATS[fromYear] || {}, cd2 = CITY_STATS[yr] || {};
+      Object.keys(cd2).sort(function(a,b){return +a-+b;}).forEach(function(sn) {
+        var d1 = cd1[sn], d2 = cd2[sn];
+        rows.push([sn, '"'+(snToName[sn]||sn)+'"', fromYear, yr,
+          d1 ? Math.round(d1.n) : "", Math.round(d2.n)]
+          .concat(slugs.map(function(s){ return chg(d1, d2, s); })));
       });
-    });
+    } else {
+      rows.push(["SEMEL_YISHUV","CITY_NAME","YEAR","N_COMMUTERS"].concat(modeHeaders));
+      var cityData = CITY_STATS[yr] || {};
+      Object.keys(cityData).sort(function(a,b){return +a-+b;}).forEach(function(sn) {
+        var d = cityData[sn];
+        rows.push([sn, '"'+(snToName[sn]||sn)+'"', yr, Math.round(d.n)]
+          .concat(slugs.map(function(s){ return d[s] != null ? d[s] : ""; })));
+      });
+    }
+  } else if (level === "rova") {
+    if (isChange) {
+      rows.push(["SEMEL_YISHUV","CITY_NAME","BOROUGH","YEAR_FROM","YEAR_TO","N_FROM","N_TO"].concat(modeHeaders));
+      var rd1 = ROVA_STATS[fromYear] || {}, rd2 = ROVA_STATS[yr] || {};
+      Object.keys(rd2).sort(function(a,b){return +a-+b;}).forEach(function(sn) {
+        Object.keys(rd2[sn]).sort(function(a,b){return +a-+b;}).forEach(function(rv) {
+          var d1 = (rd1[sn] || {})[rv], d2 = rd2[sn][rv];
+          rows.push([sn, '"'+(snToName[sn]||sn)+'"', rv, fromYear, yr,
+            d1 ? Math.round(d1.n) : "", Math.round(d2.n)]
+            .concat(slugs.map(function(s){ return chg(d1, d2, s); })));
+        });
+      });
+    } else {
+      rows.push(["SEMEL_YISHUV","CITY_NAME","BOROUGH","YEAR","N_COMMUTERS"].concat(modeHeaders));
+      var rovaData = ROVA_STATS[yr] || {};
+      Object.keys(rovaData).sort(function(a,b){return +a-+b;}).forEach(function(sn) {
+        Object.keys(rovaData[sn]).sort(function(a,b){return +a-+b;}).forEach(function(rv) {
+          var d = rovaData[sn][rv];
+          rows.push([sn, '"'+(snToName[sn]||sn)+'"', rv, yr, Math.round(d.n)]
+            .concat(slugs.map(function(s){ return d[s] != null ? d[s] : ""; })));
+        });
+      });
+    }
   } else {
-    // sub-area level from GeoJSON features
-    rows.push(["SEMEL_YISHUV","CITY_NAME","ROVA","TAT_ROVA","LEVEL","YEAR","N_COMMUTERS"].concat(headers));
-    var yrTag = yr.slice(-2);
-    var prop = function(f, s) { var v = f.properties["p"+yrTag+"_"+s]; return v != null ? v : ""; };
-    var nProp = function(f) { var v = f.properties["n"+yrTag]; return v != null ? Math.round(v) : ""; };
-    getActiveData().features.forEach(function(f) {
-      var p = f.properties;
-      rows.push([p.sn||"", '"'+(p.city||"")+'"', p.rova_code||"", p.area||"", p.level||"", yr, nProp(f)].concat(slugs.map(function(s){ return prop(f,s); })));
-    });
+    // sub-borough level from GeoJSON features
+    if (isChange) {
+      rows.push(["SEMEL_YISHUV","CITY_NAME","BOROUGH","SUB_BOROUGH","LEVEL","YEAR_FROM","YEAR_TO","N_FROM","N_TO"].concat(modeHeaders));
+      var t1 = fromYear.slice(-2), t2 = yr.slice(-2);
+      getActiveData().features.forEach(function(f) {
+        var p = f.properties;
+        var n1 = p["n"+t1], n2 = p["n"+t2];
+        rows.push([p.sn||"", '"'+(p.city||"")+'"', p.rova_code||"", p.area||"", p.level||"",
+          fromYear, yr, n1 != null ? Math.round(n1) : "", n2 != null ? Math.round(n2) : ""]
+          .concat(slugs.map(function(s) {
+            var v1 = p["p"+t1+"_"+s], v2 = p["p"+t2+"_"+s];
+            return (v1 != null && v2 != null) ? Math.round((v2-v1)*1000)/1000 : "";
+          })));
+      });
+    } else {
+      rows.push(["SEMEL_YISHUV","CITY_NAME","BOROUGH","SUB_BOROUGH","LEVEL","YEAR","N_COMMUTERS"].concat(modeHeaders));
+      var yrTag = yr.slice(-2);
+      getActiveData().features.forEach(function(f) {
+        var p = f.properties;
+        var n = p["n"+yrTag];
+        rows.push([p.sn||"", '"'+(p.city||"")+'"', p.rova_code||"", p.area||"", p.level||"", yr,
+          n != null ? Math.round(n) : ""]
+          .concat(slugs.map(function(s){ var v = p["p"+yrTag+"_"+s]; return v != null ? v : ""; })));
+      });
+    }
   }
 
+  var suffix = isChange ? (fromYear + "_to_" + yr) : yr;
   var csv = rows.map(function(r){ return r.join(","); }).join("\n");
   var blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
   var url  = URL.createObjectURL(blob);
   var a    = document.createElement("a");
-  a.href   = url; a.download = "transport_"+level+"_"+yr+".csv";
+  a.href   = url; a.download = "transport_"+level+"_"+suffix+".csv";
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
 }
