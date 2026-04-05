@@ -127,7 +127,22 @@ def load_shapes_2022():
                 str(row.get("SHEM_YISHUV_ENGLISH") or "").strip(),
                 str(row.get("SHEM_YISHUV") or "").strip(),
             )
-    return gdf.crs, diss_large, diss_medium, diss_small, city_names
+
+    # City centroids for permanent map labels
+    print("  Computing city centroids ...")
+    gdf_city = gdf.dissolve(by="SEMEL_YISHUV", aggfunc="first").reset_index()
+    gdf_city_wgs = gdf_city.to_crs(epsg=4326)
+    city_labels = []
+    for _, row in gdf_city_wgs.iterrows():
+        sn = row["SEMEL_YISHUV"]
+        en = str(row.get("SHEM_YISHUV_ENGLISH") or "").strip()
+        he = str(row.get("SHEM_YISHUV") or "").strip()
+        name = en if en else he
+        if name and row.geometry and not row.geometry.is_empty:
+            c = row.geometry.centroid
+            city_labels.append({"name": name, "lat": round(c.y, 5), "lng": round(c.x, 5)})
+
+    return gdf.crs, diss_large, diss_medium, diss_small, city_names, city_labels
 
 def load_shapes_2008():
     print("Loading 2008 shapefile ...")
@@ -331,7 +346,7 @@ def compute_caps(stats_by_year, change_features_08):
 stats_08 = load_year_stats(2008)
 stats_22 = load_year_stats(2022)
 
-crs22, diss22_large, diss22_medium, diss22_small, city_names = load_shapes_2022()
+crs22, diss22_large, diss22_medium, diss22_small, city_names, city_labels = load_shapes_2022()
 diss08_large = load_shapes_2008()
 
 # ── 2022 single-year view ─────────────────────────────────────────────────────
@@ -418,9 +433,10 @@ geojson_08 = json.dumps({"type": "FeatureCollection", "features": features_08}, 
 geojson_22 = json.dumps({"type": "FeatureCollection", "features": features_22}, ensure_ascii=False)
 print(f"\nDATA_08: ~{len(geojson_08)//1024} KB,  DATA_22: ~{len(geojson_22)//1024} KB")
 
-caps_js  = json.dumps(caps)
-years_js = json.dumps(YEARS)
-modes_js = json.dumps([
+caps_js   = json.dumps(caps)
+years_js  = json.dumps(YEARS)
+labels_js = json.dumps(city_labels, ensure_ascii=False)
+modes_js  = json.dumps([
     {"slug": m["slug"], "label": m["label"],
      "years": [yr for yr in YEARS if m[yr] is not None]}
     for m in MODES
@@ -494,6 +510,13 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
   box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important; padding: 8px 12px !important;
 }
 .leaflet-tooltip::before { display: none !important; }
+.city-label {
+  font-size: 10px; font-family: 'Segoe UI', Arial, sans-serif;
+  font-weight: 700; color: #111827; white-space: nowrap;
+  pointer-events: none; background: transparent; border: none; box-shadow: none;
+  text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff;
+  text-align: center; line-height: 1.2;
+}
 </style>
 </head>
 <body>
@@ -532,11 +555,12 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #111827; display:
   </div>
 </div>
 <script>
-var CAPS    = __CAPS__;
-var MODES   = __MODES__;
-var YEARS   = __YEARS__;
-var DATA_08 = __DATA_08__;
-var DATA_22 = __DATA_22__;
+var CAPS       = __CAPS__;
+var MODES      = __MODES__;
+var YEARS      = __YEARS__;
+var CITY_LABELS = __LABELS__;
+var DATA_08    = __DATA_08__;
+var DATA_22    = __DATA_22__;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 var viewMode    = "single";
@@ -773,6 +797,40 @@ function updateAll(rebuild) {
   }
 }
 
+// ── City name labels ──────────────────────────────────────────────────────────
+var labelLayer = L.layerGroup();
+var labelsBuilt = false;
+
+function buildLabels() {
+  if (labelsBuilt) return;
+  labelsBuilt = true;
+  CITY_LABELS.forEach(function(cl) {
+    L.marker([cl.lat, cl.lng], {
+      icon: L.divIcon({
+        className: "city-label",
+        html: cl.name,
+        iconSize: null,
+        iconAnchor: [0, 0]
+      }),
+      interactive: false,
+      keyboard: false
+    }).addTo(labelLayer);
+  });
+}
+
+function syncLabels() {
+  var z = map.getZoom();
+  if (z >= 10) {
+    buildLabels();
+    if (!map.hasLayer(labelLayer)) labelLayer.addTo(map);
+  } else {
+    if (map.hasLayer(labelLayer)) labelLayer.remove();
+  }
+}
+
+map.on("zoomend", syncLabels);
+syncLabels();
+
 rebuildLayer();
 updateAll(false);
 </script>
@@ -784,6 +842,7 @@ html_out = (HTML
     .replace("__CAPS__",    caps_js)
     .replace("__MODES__",   modes_js)
     .replace("__YEARS__",   years_js)
+    .replace("__LABELS__",  labels_js)
     .replace("__DATA_08__", geojson_08)
     .replace("__DATA_22__", geojson_22))
 
